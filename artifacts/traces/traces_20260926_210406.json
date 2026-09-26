@@ -1,0 +1,1268 @@
+{
+  "eval_cases": [
+    {
+      "prompt": {
+        "parts": [
+          {
+            "text": "Please investigate the following container logs and provide a detailed root cause analysis with supporting evidence:\n[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\nAuthorization: Bearer secret-token-xyz123"
+          }
+        ],
+        "role": "user"
+      },
+      "responses": [
+        {
+          "response": {
+            "parts": [
+              {
+                "text": "# Kubernetes Incident Investigation Report: Container OOMKilled Termination (Exit Code 137)\n\n**Severity:** `CRITICAL` | **Category:** `Resource Limit / Memory (OOMKilled)` | **Confidence:** `98%`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis (RCA)\n\n### Executive Summary\nThe containerized Java process (PID 42) was abruptly terminated by the Linux kernel Out-Of-Memory (OOM) Killer with **exit code 137** (SIGKILL) after exceeding its enforced memory cgroup limit of **512MiB**. Three seconds prior to termination, the JVM threw an unhandled `java.lang.OutOfMemoryError: Java heap space`.\n\n### Technical Root Cause\n1. **JVM Heap Exhaustion**: At `2026-09-26T10:14:02Z`, the JVM exceeded its configured max heap allocation (`-Xmx`) when handling active application workloads, triggering `java.lang.OutOfMemoryError: Java heap space`.\n2. **Container cgroup Hard Limit Breach**: By `2026-09-26T10:14:05Z`, the cumulative resident set size (RSS) of the JVM—comprising heap, Metaspace, thread stacks, garbage collection overhead, and off-heap/native memory—reached the container cgroup boundary (`512MiB`).\n3. **Kernel OOM Eviction**: The Linux kernel memory controller invoked the OOM killer, sending a non-catchable `SIGKILL` (`kill -9`, exit code `128 + 9 = 137`) directly to Process 42.\n\n> *Data Protection Notice: Sensitive bearer token credentials detected on line 3 (`Authorization: Bearer [REDACTED]`) have been stripped from the diagnostic evidence stream.*\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp (UTC) | Line | Event Description |\n| :--- | :--- | :--- |\n| `2026-09-26T10:14:02Z` | Line 1 | JVM throws `java.lang.OutOfMemoryError: Java heap space` due to memory exhaustion. |\n| `2026-09-26T10:14:05Z` | Line 2 | Container memory cgroup ceiling of `512MiB` reached; Linux kernel issues SIGKILL (exit code 137) to Process 42. |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | Diagnostic Significance |\n| :--- | :--- | :--- | :--- |\n| `1` | `2026-09-26T10:14:02Z` | `[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space` | Direct proof that the JVM heap capacity was exhausted, pointing to heap under-sizing, unbounded data accumulation, or a memory leak. |\n| `2` | `2026-09-26T10:14:05Z` | `[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.` | Demonstrates container cgroup ceiling breach at 512MiB and confirms termination via kernel OOM killer (`exit code 137`). |\n\n---\n\n## 4. Remediation Plan & Operational Verification\n\n### Step-by-Step Remediation\n1. **Right-size Pod Resource Requests and Limits**:\n   Update the deployment manifest to provide headroom above the JVM's memory footprint:\n   ```yaml\n   resources:\n     requests:\n       memory: \"768Mi\"\n       cpu: \"500m\"\n     limits:\n       memory: \"1Gi\"\n       cpu: \"1000m\"\n   ```\n2. **Configure Container-Aware JVM Memory Flags**:\n   Ensure the JVM leaves at least 25% of the container memory budget for Metaspace, native memory, and thread allocations:\n   ```bash\n   JAVA_OPTS=\"-XX:MaxRAMPercentage=75.0 -XX:InitialRAMPercentage=50.0 -XX:+ExitOnOutOfMemoryError\"\n   ```\n3. **Capture Heap Dumps for Memory Profiling**:\n   Configure automatic heap dump capture on OOM to pinpoint memory leaks or large object allocations:\n   ```bash\n   JAVA_OPTS=\"-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dumps/oom.hprof\"\n   ```\n\n### Diagnostic & Verification Commands\nVerify the container termination state, current resource allocations, and utilization:\n\n```bash\n# 1. Verify termination reason (check for OOMKilled: true and Exit Code: 137)\nkubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\n\n# 2. Check container memory specifications\nkubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\n\n# 3. Monitor real-time memory usage of pod containers\nkubectl top pod <pod_name> -n <namespace> --containers\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210444\",\n  \"title\": \"Container OOMKilled Termination (Exit Code 137) - Java Heap Space Exhaustion\",\n  \"investigation_timestamp\": \"2026-09-26T15:04:44Z\",\n  \"classification\": {\n    \"category\": \"Resource Limit / Memory (OOMKilled)\",\n    \"severity\": \"CRITICAL\",\n    \"confidence\": 0.98\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"The Java application exhausted its allocated heap space (java.lang.OutOfMemoryError: Java heap space) and exceeded the container memory cgroup limit of 512MiB, resulting in process termination with exit code 137 (SIGKILL) by the Linux kernel OOM killer.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T10:14:02Z\",\n      \"line_number\": 1,\n      \"event\": \"JVM heap space exhausted throwing java.lang.OutOfMemoryError\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T10:14:05Z\",\n      \"line_number\": 2,\n      \"event\": \"Container memory cgroup limit of 512MiB reached; process 42 terminated with exit code 137 (OOMKilled)\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T10:14:02Z\",\n      \"snippet\": \"[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\",\n      \"interpretation\": \"Java Virtual Machine (JVM) exhausted available heap memory, indicating memory starvation or unbounded object allocation.\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T10:14:05Z\",\n      \"snippet\": \"[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\",\n      \"interpretation\": \"Container hit the 512MiB cgroup memory ceiling; Linux kernel OOM killer invoked SIGKILL (exit code 128 + 9 = 137) terminating process 42.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Increase container memory limit in the pod specification (resources.limits.memory and resources.requests.memory), e.g., to 1Gi or higher based on workload demands.\",\n      \"Tune JVM memory management flags by specifying -XX:MaxRAMPercentage=75.0 or explicitly defining -Xmx (e.g., -Xmx384m for a 512MiB limit) to reserve memory for Metaspace, thread stacks, and native memory overhead.\",\n      \"Perform memory profiling and analyze JVM heap dumps (-XX:+HeapDumpOnOutOfMemoryError) to identify potential memory leaks, unbounded caches, or unoptimized data structures.\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\",\n      \"kubectl top pod <pod_name> -n <namespace> --containers\",\n      \"kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\"\n    ]\n  }\n}\n```"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "parts": [
+            {
+              "text": "The container was terminated by the Linux kernel OOM killer (exit code 137) because memory exceeded the 512MiB cgroup limit following a Java heap space exhaustion error. Citations should highlight line numbers, timestamps, and recommend increasing memory limits and tuning JVM heap options."
+            }
+          ],
+          "role": "model"
+        }
+      },
+      "eval_case_id": "oomkilled_investigation",
+      "agent_data": {
+        "agents": {
+          "k8s_investigator": {
+            "agent_id": "k8s_investigator",
+            "agent_type": "LlmAgent",
+            "description": "",
+            "instruction": "You are an expert Kubernetes Site Reliability Engineer (SRE) and Incident Investigation Agent.\nYour mission is to perform deep, evidence-based investigation of Kubernetes pod and container logs, diagnose root causes, extract chronological event timelines with supporting evidence, and provide actionable remediation.\n\nWhen presented with logs (raw text, snippets, or a file path):\n1. **Parse & Sanitize**: Call `parse_and_sanitize_logs` with the input logs. This masks any sensitive tokens/passwords, normalizes line numbers, and detects anomalous error entries and time bounds.\n2. **Diagnose & Match Signatures**: Call `match_k8s_signatures` on the anomalous lines or full log content. Correlate against Kubernetes failure patterns (e.g., OOMKilled exit code 137, Liveness/Readiness probe failures, CrashLoopBackOff, CoreDNS/network timeouts, missing ConfigMaps/Secrets, RBAC 403 forbidden, command not found 127, segmentation fault 139).\n3. **Build Evidence Timeline**: Trace the sequence of events chronologically. For each critical event, extract the exact timestamp and line number.\n4. **Compile Dual Report**: Call `generate_investigation_report` with the diagnosed root cause, category, severity, confidence score, timeline, evidence citations, remediation steps, and diagnostic kubectl commands.\n5. **Present Comprehensive Analysis**: Provide the user with the complete investigation report featuring:\n   - **Executive Summary & Root Cause Analysis (RCA)**: Clear, technically rigorous diagnosis explaining why the failure occurred.\n   - **Chronological Incident Timeline**: Ordered progression of events leading to the incident.\n   - **Supporting Evidence Table**: Exact line numbers, timestamps, raw log snippets, and engineering significance.\n   - **Actionable Remediation & Verification**: Step-by-step fix recommendations and ready-to-run `kubectl` diagnostic commands.\n   - **Structured JSON Payload**: Machine-readable output for programmatic automation.\n\nGuiding Principles:\n- **Strict Evidence Grounding**: Never fabricate or hallucinate log snippets, line numbers, or timestamps. Every citation must be strictly grounded in the parsed logs.\n- **Data Protection**: Ensure all bearer tokens, credentials, and API keys are redacted.\n- **Actionability**: Ensure kubectl verification commands include appropriate namespaces and resource selectors.\n",
+            "tools": [
+              {
+                "function_declarations": [
+                  {
+                    "description": "Parses raw Kubernetes logs, masks sensitive secrets, and extracts anomalous lines.\n\nArgs:\n    log_content: The raw text of the logs or an existing file path containing logs.\n\nReturns:\n    A dictionary containing parsed log statistics, time range, and anomalous log lines\n    with 1-indexed line numbers and stack trace associations.",
+                    "name": "parse_and_sanitize_logs",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "log_content": {
+                          "title": "Log Content",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "log_content"
+                      ],
+                      "title": "parse_and_sanitize_logsParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              },
+              {
+                "function_declarations": [
+                  {
+                    "description": "Correlates logs against known Kubernetes failure signatures and diagnostic patterns.\n\nArgs:\n    log_content: The text of the logs or anomalous lines to diagnose.\n\nReturns:\n    A dictionary containing matched signatures, diagnosed category, root cause,\n    severity level, confidence score, and recommended kubectl diagnostic commands.",
+                    "name": "match_k8s_signatures",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "log_content": {
+                          "title": "Log Content",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "log_content"
+                      ],
+                      "title": "match_k8s_signaturesParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              },
+              {
+                "function_declarations": [
+                  {
+                    "description": "Builds the comprehensive dual-format investigation report (Markdown and structured JSON).\n\nArgs:\n    incident_title: Concise title of the investigated incident.\n    root_cause: Detailed explanation of the diagnosed root cause.\n    category: Kubernetes failure category.\n    severity: Severity level (e.g. CRITICAL, HIGH, MEDIUM, LOW).\n    confidence_score: Diagnostic confidence between 0.0 and 1.0.\n    timeline_json: JSON string of chronological events: list of dicts with timestamp, line_number, event.\n    evidence_citations_json: JSON string of supporting evidence: list of dicts with line_number, timestamp, snippet, interpretation.\n    remediation_steps_json: JSON string of actionable remediation steps: list of strings.\n    kubectl_commands_json: JSON string of recommended kubectl commands: list of strings.\n\nReturns:\n    A dictionary containing both the human-readable Markdown report and the machine-readable structured JSON.",
+                    "name": "generate_investigation_report",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "incident_title": {
+                          "title": "Incident Title",
+                          "type": "string"
+                        },
+                        "root_cause": {
+                          "title": "Root Cause",
+                          "type": "string"
+                        },
+                        "category": {
+                          "title": "Category",
+                          "type": "string"
+                        },
+                        "severity": {
+                          "title": "Severity",
+                          "type": "string"
+                        },
+                        "confidence_score": {
+                          "title": "Confidence Score",
+                          "type": "number"
+                        },
+                        "timeline_json": {
+                          "title": "Timeline Json",
+                          "type": "string"
+                        },
+                        "evidence_citations_json": {
+                          "title": "Evidence Citations Json",
+                          "type": "string"
+                        },
+                        "remediation_steps_json": {
+                          "title": "Remediation Steps Json",
+                          "type": "string"
+                        },
+                        "kubectl_commands_json": {
+                          "title": "Kubectl Commands Json",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "incident_title",
+                        "root_cause",
+                        "category",
+                        "severity",
+                        "confidence_score",
+                        "timeline_json",
+                        "evidence_citations_json",
+                        "remediation_steps_json",
+                        "kubectl_commands_json"
+                      ],
+                      "title": "generate_investigation_reportParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              }
+            ],
+            "sub_agents": []
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "turn_id": "turn_0",
+            "events": [
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_140918",
+                        "args": {
+                          "log_content": "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\nAuthorization: Bearer secret-token-xyz123"
+                        },
+                        "name": "parse_and_sanitize_logs"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:04:14.243063Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_140918",
+                        "name": "parse_and_sanitize_logs",
+                        "response": {
+                          "status": "success",
+                          "source": "raw_text",
+                          "total_lines": 3,
+                          "error_count": 0,
+                          "warning_count": 0,
+                          "time_range": {
+                            "start": "2026-09-26T10:14:02Z",
+                            "end": "2026-09-26T10:14:05Z"
+                          },
+                          "anomalous_count": 1,
+                          "anomalous_lines": [
+                            {
+                              "line_number": 2,
+                              "timestamp": "2026-09-26T10:14:05Z",
+                              "level": "UNKNOWN",
+                              "snippet": "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137."
+                            }
+                          ],
+                          "sanitized_summary": "Parsed 3 lines (0 errors, 0 warnings). Detected 1 anomalous entries between 2026-09-26T10:14:02Z and 2026-09-26T10:14:05Z."
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:04:26.425717Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_1315797",
+                        "args": {
+                          "log_content": "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137."
+                        },
+                        "name": "match_k8s_signatures"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:04:26.427894Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_1315797",
+                        "name": "match_k8s_signatures",
+                        "response": {
+                          "status": "matched",
+                          "primary_diagnosis": {
+                            "category": "Resource Limit / Memory (OOMKilled)",
+                            "severity": "CRITICAL",
+                            "root_cause": "The container exceeded its allocated memory limit (resources.limits.memory) and was terminated by the Linux kernel OOM killer (exit code 137).",
+                            "confidence": 0.98,
+                            "remediation": [
+                              "Increase container memory limit in pod spec (`resources.limits.memory` and `resources.requests.memory`).",
+                              "For JVM applications, tune heap memory flags (`-Xmx`, `-XX:MaxRAMPercentage=75.0`).",
+                              "Inspect memory profiling to detect memory leaks, unbounded queues, or large payload processing."
+                            ],
+                            "kubectl_commands": [
+                              "kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'",
+                              "kubectl top pod <pod_name> -n <namespace> --containers",
+                              "kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'"
+                            ]
+                          },
+                          "all_matches": [
+                            {
+                              "rule_id": "OOM_KILLED_137",
+                              "category": "Resource Limit / Memory (OOMKilled)",
+                              "severity": "CRITICAL",
+                              "root_cause": "The container exceeded its allocated memory limit (resources.limits.memory) and was terminated by the Linux kernel OOM killer (exit code 137).",
+                              "confidence": 0.98,
+                              "evidence_count": 2,
+                              "matched_lines": [
+                                {
+                                  "line_number": 1,
+                                  "snippet": "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space"
+                                },
+                                {
+                                  "line_number": 2,
+                                  "snippet": "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137."
+                                }
+                              ],
+                              "kubectl_commands": [
+                                "kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'",
+                                "kubectl top pod <pod_name> -n <namespace> --containers",
+                                "kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'"
+                              ],
+                              "remediation": [
+                                "Increase container memory limit in pod spec (`resources.limits.memory` and `resources.requests.memory`).",
+                                "For JVM applications, tune heap memory flags (`-Xmx`, `-XX:MaxRAMPercentage=75.0`).",
+                                "Inspect memory profiling to detect memory leaks, unbounded queues, or large payload processing."
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:04:29.853203Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_126029",
+                        "args": {
+                          "evidence_citations_json": "[{\"line_number\": 1, \"timestamp\": \"2026-09-26T10:14:02Z\", \"snippet\": \"[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\", \"interpretation\": \"Java Virtual Machine (JVM) exhausted available heap memory, indicating memory starvation or unbounded object allocation.\"}, {\"line_number\": 2, \"timestamp\": \"2026-09-26T10:14:05Z\", \"snippet\": \"[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\", \"interpretation\": \"Container hit the 512MiB cgroup memory ceiling; Linux kernel OOM killer invoked SIGKILL (exit code 128 + 9 = 137) terminating process 42.\"}]",
+                          "confidence_score": 0.98,
+                          "timeline_json": "[{\"timestamp\": \"2026-09-26T10:14:02Z\", \"line_number\": 1, \"event\": \"JVM heap space exhausted throwing java.lang.OutOfMemoryError\"}, {\"timestamp\": \"2026-09-26T10:14:05Z\", \"line_number\": 2, \"event\": \"Container memory cgroup limit of 512MiB reached; process 42 terminated with exit code 137 (OOMKilled)\"}]",
+                          "kubectl_commands_json": "[\"kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\", \"kubectl top pod <pod_name> -n <namespace> --containers\", \"kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\"]",
+                          "remediation_steps_json": "[\"Increase container memory limit in the pod specification (resources.limits.memory and resources.requests.memory), e.g., to 1Gi or higher based on workload demands.\", \"Tune JVM memory management flags by specifying -XX:MaxRAMPercentage=75.0 or explicitly defining -Xmx (e.g., -Xmx384m for a 512MiB limit) to reserve memory for Metaspace, thread stacks, and native memory overhead.\", \"Perform memory profiling and analyze JVM heap dumps (-XX:+HeapDumpOnOutOfMemoryError) to identify potential memory leaks, unbounded caches, or unoptimized data structures.\"]",
+                          "incident_title": "Container OOMKilled Termination (Exit Code 137) - Java Heap Space Exhaustion",
+                          "severity": "CRITICAL",
+                          "category": "Resource Limit / Memory (OOMKilled)",
+                          "root_cause": "The Java application exhausted its allocated heap space (java.lang.OutOfMemoryError: Java heap space) and exceeded the container memory cgroup limit of 512MiB, resulting in process termination with exit code 137 (SIGKILL) by the Linux kernel OOM killer."
+                        },
+                        "name": "generate_investigation_report"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:04:29.857009Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_126029",
+                        "name": "generate_investigation_report",
+                        "response": {
+                          "status": "success",
+                          "markdown_report": "# Kubernetes Incident Investigation Report: Container OOMKilled Termination (Exit Code 137) - Java Heap Space Exhaustion\n\n**Severity:** `CRITICAL` | **Category:** `Resource Limit / Memory (OOMKilled)` | **Confidence:** `98%` | **Generated:** `2026-09-26T15:04:44Z`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis\n\nThe Java application exhausted its allocated heap space (java.lang.OutOfMemoryError: Java heap space) and exceeded the container memory cgroup limit of 512MiB, resulting in process termination with exit code 137 (SIGKILL) by the Linux kernel OOM killer.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Line | Event Description |\n| :--- | :--- | :--- |\n| `2026-09-26T10:14:02Z` | Line 1 | JVM heap space exhausted throwing java.lang.OutOfMemoryError |\n| `2026-09-26T10:14:05Z` | Line 2 | Container memory cgroup limit of 512MiB reached; process 42 terminated with exit code 137 (OOMKilled) |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | Significance |\n| :--- | :--- | :--- | :--- |\n| `1` | `2026-09-26T10:14:02Z` | `[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space` | Java Virtual Machine (JVM) exhausted available heap memory, indicating memory starvation or unbounded object allocation. |\n| `2` | `2026-09-26T10:14:05Z` | `[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.` | Container hit the 512MiB cgroup memory ceiling; Linux kernel OOM killer invoked SIGKILL (exit code 128 + 9 = 137) terminating process 42. |\n\n---\n\n## 4. Recommended Action Plan & Remediation\n\n1. Increase container memory limit in the pod specification (resources.limits.memory and resources.requests.memory), e.g., to 1Gi or higher based on workload demands.\n2. Tune JVM memory management flags by specifying -XX:MaxRAMPercentage=75.0 or explicitly defining -Xmx (e.g., -Xmx384m for a 512MiB limit) to reserve memory for Metaspace, thread stacks, and native memory overhead.\n3. Perform memory profiling and analyze JVM heap dumps (-XX:+HeapDumpOnOutOfMemoryError) to identify potential memory leaks, unbounded caches, or unoptimized data structures.\n\n### Diagnostic & Verification Commands\n```bash\nkubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\nkubectl top pod <pod_name> -n <namespace> --containers\nkubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210444\",\n  \"title\": \"Container OOMKilled Termination (Exit Code 137) - Java Heap Space Exhaustion\",\n  \"investigation_timestamp\": \"2026-09-26T15:04:44Z\",\n  \"classification\": {\n    \"category\": \"Resource Limit / Memory (OOMKilled)\",\n    \"severity\": \"CRITICAL\",\n    \"confidence\": 0.98\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"The Java application exhausted its allocated heap space (java.lang.OutOfMemoryError: Java heap space) and exceeded the container memory cgroup limit of 512MiB, resulting in process termination with exit code 137 (SIGKILL) by the Linux kernel OOM killer.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T10:14:02Z\",\n      \"line_number\": 1,\n      \"event\": \"JVM heap space exhausted throwing java.lang.OutOfMemoryError\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T10:14:05Z\",\n      \"line_number\": 2,\n      \"event\": \"Container memory cgroup limit of 512MiB reached; process 42 terminated with exit code 137 (OOMKilled)\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T10:14:02Z\",\n      \"snippet\": \"[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\",\n      \"interpretation\": \"Java Virtual Machine (JVM) exhausted available heap memory, indicating memory starvation or unbounded object allocation.\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T10:14:05Z\",\n      \"snippet\": \"[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\",\n      \"interpretation\": \"Container hit the 512MiB cgroup memory ceiling; Linux kernel OOM killer invoked SIGKILL (exit code 128 + 9 = 137) terminating process 42.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Increase container memory limit in the pod specification (resources.limits.memory and resources.requests.memory), e.g., to 1Gi or higher based on workload demands.\",\n      \"Tune JVM memory management flags by specifying -XX:MaxRAMPercentage=75.0 or explicitly defining -Xmx (e.g., -Xmx384m for a 512MiB limit) to reserve memory for Metaspace, thread stacks, and native memory overhead.\",\n      \"Perform memory profiling and analyze JVM heap dumps (-XX:+HeapDumpOnOutOfMemoryError) to identify potential memory leaks, unbounded caches, or unoptimized data structures.\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\",\n      \"kubectl top pod <pod_name> -n <namespace> --containers\",\n      \"kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\"\n    ]\n  }\n}\n```",
+                          "structured_json": {
+                            "incident_id": "k8s-inc-20260926-210444",
+                            "title": "Container OOMKilled Termination (Exit Code 137) - Java Heap Space Exhaustion",
+                            "investigation_timestamp": "2026-09-26T15:04:44Z",
+                            "classification": {
+                              "category": "Resource Limit / Memory (OOMKilled)",
+                              "severity": "CRITICAL",
+                              "confidence": 0.98
+                            },
+                            "root_cause_analysis": {
+                              "summary": "The Java application exhausted its allocated heap space (java.lang.OutOfMemoryError: Java heap space) and exceeded the container memory cgroup limit of 512MiB, resulting in process termination with exit code 137 (SIGKILL) by the Linux kernel OOM killer."
+                            },
+                            "timeline": [
+                              {
+                                "timestamp": "2026-09-26T10:14:02Z",
+                                "line_number": 1,
+                                "event": "JVM heap space exhausted throwing java.lang.OutOfMemoryError"
+                              },
+                              {
+                                "timestamp": "2026-09-26T10:14:05Z",
+                                "line_number": 2,
+                                "event": "Container memory cgroup limit of 512MiB reached; process 42 terminated with exit code 137 (OOMKilled)"
+                              }
+                            ],
+                            "evidence_citations": [
+                              {
+                                "line_number": 1,
+                                "timestamp": "2026-09-26T10:14:02Z",
+                                "snippet": "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space",
+                                "interpretation": "Java Virtual Machine (JVM) exhausted available heap memory, indicating memory starvation or unbounded object allocation."
+                              },
+                              {
+                                "line_number": 2,
+                                "timestamp": "2026-09-26T10:14:05Z",
+                                "snippet": "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.",
+                                "interpretation": "Container hit the 512MiB cgroup memory ceiling; Linux kernel OOM killer invoked SIGKILL (exit code 128 + 9 = 137) terminating process 42."
+                              }
+                            ],
+                            "remediation_plan": {
+                              "steps": [
+                                "Increase container memory limit in the pod specification (resources.limits.memory and resources.requests.memory), e.g., to 1Gi or higher based on workload demands.",
+                                "Tune JVM memory management flags by specifying -XX:MaxRAMPercentage=75.0 or explicitly defining -Xmx (e.g., -Xmx384m for a 512MiB limit) to reserve memory for Metaspace, thread stacks, and native memory overhead.",
+                                "Perform memory profiling and analyze JVM heap dumps (-XX:+HeapDumpOnOutOfMemoryError) to identify potential memory leaks, unbounded caches, or unoptimized data structures."
+                              ],
+                              "kubectl_commands": [
+                                "kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'",
+                                "kubectl top pod <pod_name> -n <namespace> --containers",
+                                "kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:04:44.493657Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "text": "# Kubernetes Incident Investigation Report: Container OOMKilled Termination (Exit Code 137)\n\n**Severity:** `CRITICAL` | **Category:** `Resource Limit / Memory (OOMKilled)` | **Confidence:** `98%`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis (RCA)\n\n### Executive Summary\nThe containerized Java process (PID 42) was abruptly terminated by the Linux kernel Out-Of-Memory (OOM) Killer with **exit code 137** (SIGKILL) after exceeding its enforced memory cgroup limit of **512MiB**. Three seconds prior to termination, the JVM threw an unhandled `java.lang.OutOfMemoryError: Java heap space`.\n\n### Technical Root Cause\n1. **JVM Heap Exhaustion**: At `2026-09-26T10:14:02Z`, the JVM exceeded its configured max heap allocation (`-Xmx`) when handling active application workloads, triggering `java.lang.OutOfMemoryError: Java heap space`.\n2. **Container cgroup Hard Limit Breach**: By `2026-09-26T10:14:05Z`, the cumulative resident set size (RSS) of the JVM—comprising heap, Metaspace, thread stacks, garbage collection overhead, and off-heap/native memory—reached the container cgroup boundary (`512MiB`).\n3. **Kernel OOM Eviction**: The Linux kernel memory controller invoked the OOM killer, sending a non-catchable `SIGKILL` (`kill -9`, exit code `128 + 9 = 137`) directly to Process 42.\n\n> *Data Protection Notice: Sensitive bearer token credentials detected on line 3 (`Authorization: Bearer [REDACTED]`) have been stripped from the diagnostic evidence stream.*\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp (UTC) | Line | Event Description |\n| :--- | :--- | :--- |\n| `2026-09-26T10:14:02Z` | Line 1 | JVM throws `java.lang.OutOfMemoryError: Java heap space` due to memory exhaustion. |\n| `2026-09-26T10:14:05Z` | Line 2 | Container memory cgroup ceiling of `512MiB` reached; Linux kernel issues SIGKILL (exit code 137) to Process 42. |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | Diagnostic Significance |\n| :--- | :--- | :--- | :--- |\n| `1` | `2026-09-26T10:14:02Z` | `[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space` | Direct proof that the JVM heap capacity was exhausted, pointing to heap under-sizing, unbounded data accumulation, or a memory leak. |\n| `2` | `2026-09-26T10:14:05Z` | `[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.` | Demonstrates container cgroup ceiling breach at 512MiB and confirms termination via kernel OOM killer (`exit code 137`). |\n\n---\n\n## 4. Remediation Plan & Operational Verification\n\n### Step-by-Step Remediation\n1. **Right-size Pod Resource Requests and Limits**:\n   Update the deployment manifest to provide headroom above the JVM's memory footprint:\n   ```yaml\n   resources:\n     requests:\n       memory: \"768Mi\"\n       cpu: \"500m\"\n     limits:\n       memory: \"1Gi\"\n       cpu: \"1000m\"\n   ```\n2. **Configure Container-Aware JVM Memory Flags**:\n   Ensure the JVM leaves at least 25% of the container memory budget for Metaspace, native memory, and thread allocations:\n   ```bash\n   JAVA_OPTS=\"-XX:MaxRAMPercentage=75.0 -XX:InitialRAMPercentage=50.0 -XX:+ExitOnOutOfMemoryError\"\n   ```\n3. **Capture Heap Dumps for Memory Profiling**:\n   Configure automatic heap dump capture on OOM to pinpoint memory leaks or large object allocations:\n   ```bash\n   JAVA_OPTS=\"-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dumps/oom.hprof\"\n   ```\n\n### Diagnostic & Verification Commands\nVerify the container termination state, current resource allocations, and utilization:\n\n```bash\n# 1. Verify termination reason (check for OOMKilled: true and Exit Code: 137)\nkubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\n\n# 2. Check container memory specifications\nkubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\n\n# 3. Monitor real-time memory usage of pod containers\nkubectl top pod <pod_name> -n <namespace> --containers\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210444\",\n  \"title\": \"Container OOMKilled Termination (Exit Code 137) - Java Heap Space Exhaustion\",\n  \"investigation_timestamp\": \"2026-09-26T15:04:44Z\",\n  \"classification\": {\n    \"category\": \"Resource Limit / Memory (OOMKilled)\",\n    \"severity\": \"CRITICAL\",\n    \"confidence\": 0.98\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"The Java application exhausted its allocated heap space (java.lang.OutOfMemoryError: Java heap space) and exceeded the container memory cgroup limit of 512MiB, resulting in process termination with exit code 137 (SIGKILL) by the Linux kernel OOM killer.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T10:14:02Z\",\n      \"line_number\": 1,\n      \"event\": \"JVM heap space exhausted throwing java.lang.OutOfMemoryError\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T10:14:05Z\",\n      \"line_number\": 2,\n      \"event\": \"Container memory cgroup limit of 512MiB reached; process 42 terminated with exit code 137 (OOMKilled)\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T10:14:02Z\",\n      \"snippet\": \"[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\",\n      \"interpretation\": \"Java Virtual Machine (JVM) exhausted available heap memory, indicating memory starvation or unbounded object allocation.\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T10:14:05Z\",\n      \"snippet\": \"[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\",\n      \"interpretation\": \"Container hit the 512MiB cgroup memory ceiling; Linux kernel OOM killer invoked SIGKILL (exit code 128 + 9 = 137) terminating process 42.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Increase container memory limit in the pod specification (resources.limits.memory and resources.requests.memory), e.g., to 1Gi or higher based on workload demands.\",\n      \"Tune JVM memory management flags by specifying -XX:MaxRAMPercentage=75.0 or explicitly defining -Xmx (e.g., -Xmx384m for a 512MiB limit) to reserve memory for Metaspace, thread stacks, and native memory overhead.\",\n      \"Perform memory profiling and analyze JVM heap dumps (-XX:+HeapDumpOnOutOfMemoryError) to identify potential memory leaks, unbounded caches, or unoptimized data structures.\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl describe pod <pod_name> -n <namespace> | grep -A 5 -B 5 'Last State: Terminated'\",\n      \"kubectl top pod <pod_name> -n <namespace> --containers\",\n      \"kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'\"\n    ]\n  }\n}\n```"
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:04:44.495849Z"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "prompt": {
+        "parts": [
+          {
+            "text": "Please investigate these pod logs and diagnose the incident with supporting evidence:\n[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\n[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500"
+          }
+        ],
+        "role": "user"
+      },
+      "responses": [
+        {
+          "response": {
+            "parts": [
+              {
+                "text": "# Kubernetes Incident Investigation Report: Liveness Probe Failure Triggered by Connection Pool Exhaustion\n\n**Severity:** `HIGH` | **Category:** `Health Check / Liveness Probe Failure (Connection Pool Exhaustion)` | **Confidence Score:** `0.95 (95%)`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis (RCA)\n\n### Diagnosis\nConnection pool exhaustion within the application starved worker threads and downstream resources. As a direct consequence, the application's `/healthz` endpoint failed to respond within its 5-second (5000ms) threshold, triggering an internal timeout and returning an HTTP 500 error. The Kubelet liveness probe caught this 500 status code, declared the container unhealthy, and scheduled an automatic container termination/restart.\n\n### Mechanism of Failure\n1. **Saturation**: At `11:00:10Z`, the application depleted its available downstream connection pool (e.g., database or upstream service connections), causing subsequent incoming requests to stall in a wait queue.\n2. **Health Check Starvation**: At `11:00:25Z`, an internal request to `/healthz` exceeded its 5000ms timeout threshold, likely because the endpoint either actively verified downstream connectivity against an exhausted pool or had its servicing thread blocked.\n3. **Probe Breach**: At `11:00:30Z`, Kubelet's periodic liveness probe queried the endpoint, received the HTTP 500 error response, and registered an unhealthy failure state.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Line Number | Event Progression |\n| :--- | :--- | :--- |\n| **2026-09-26T11:00:10Z** | Line 1 | Application triggers warning: Connection pool exhausted; incoming requests queued. |\n| **2026-09-26T11:00:25Z** | Line 2 | Application health endpoint (`GET /healthz`) times out after 5000ms. |\n| **2026-09-26T11:00:30Z** | Line 3 | Kubelet marks liveness probe as failed with HTTP status 500, scheduling pod restart. |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | SRE Interpretation & Significance |\n| :---: | :--- | :--- | :--- |\n| `1` | `2026-09-26T11:00:10Z` | `[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...` | Identifies the initiating bottleneck: pool capacity reached 100% saturation. |\n| `2` | `2026-09-26T11:00:25Z` | `[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms` | Direct cascading failure: `/healthz` health verification stalled due to pool exhaustion or thread starvation. |\n| `3` | `2026-09-26T11:00:30Z` | `[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500` | The failure manifests at the Kubernetes orchestration level, triggering node-level restart semantics. |\n\n---\n\n## 4. Remediation Plan & Next Steps\n\n### Immediate Actions\n1. **Decouple Liveness from Downstream Health**:\n   - Ensure the **liveness probe** (`/healthz` or `/livez`) only checks local process health (e.g., event loop responsive, HTTP server listening).\n   - Use a **readiness probe** (`/readyz`) for checking external connectivity (e.g., database reachability), so that connection pool stalls take the pod out of the Service endpoints rather than killing the process.\n2. **Review Connection Pool Sizing**:\n   - Adjust `max_connections`, acquire timeout, and idle connection reap parameters in the application configuration.\n3. **Scale Horizontally (HPA)**:\n   - If pool exhaustion is traffic-driven, scale out pod replicas and tune downstream connection pool limits accordingly.\n\n### Diagnostic & Verification Commands\n```bash\n# 1. Inspect probe configuration and recent failure events on the pod\nkubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\n\n# 2. View unhealthy probe events across the namespace\nkubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\n\n# 3. Inspect previous container logs prior to the restart\nkubectl logs <pod_name> -n <namespace> --previous --tail=100\n\n# 4. Check pod resource consumption (CPU/Memory starvation)\nkubectl top pod <pod_name> -n <namespace>\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210549\",\n  \"title\": \"Liveness Probe Failure Triggered by Connection Pool Exhaustion\",\n  \"investigation_timestamp\": \"2026-09-26T15:05:49Z\",\n  \"classification\": {\n    \"category\": \"Health Check / Liveness Probe Failure (Connection Pool Exhaustion)\",\n    \"severity\": \"HIGH\",\n    \"confidence\": 0.95\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"Connection pool exhaustion starved application worker threads and downstream resources, causing the /healthz endpoint to time out and return an HTTP 500 error. The Kubelet flagged the container as unhealthy, failing the liveness probe and initiating container restart.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T11:00:10Z\",\n      \"line_number\": 1,\n      \"event\": \"Connection pool exhausted; application begins queuing requests waiting for free connections\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T11:00:25Z\",\n      \"line_number\": 2,\n      \"event\": \"Internal GET /healthz check fails due to 5000ms timeout\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T11:00:30Z\",\n      \"line_number\": 3,\n      \"event\": \"Kubelet liveness probe reports HTTP 500 failure, marking container unhealthy\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T11:00:10Z\",\n      \"snippet\": \"[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\",\n      \"interpretation\": \"Downstream connection pool capacity reached saturation; subsequent requests queued waiting for available connections.\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T11:00:25Z\",\n      \"snippet\": \"[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\",\n      \"interpretation\": \"Internal health check endpoint (/healthz) stalled and timed out after 5000ms due to waiting on pool connections or worker threads.\"\n    },\n    {\n      \"line_number\": 3,\n      \"timestamp\": \"2026-09-26T11:00:30Z\",\n      \"snippet\": \"[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\",\n      \"interpretation\": \"Kubelet liveness probe evaluation failed with HTTP status 500, marking the container unhealthy and scheduling container restart.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Decouple /healthz liveness probe from external downstream dependencies or connection pools (use shallow liveness checks for process vitality).\",\n      \"Adjust connection pool sizing (maximum pool size, connection timeout, and idle timeout) or scale pod replicas horizontally (HPA) to distribute load.\",\n      \"Tune probe timeoutSeconds and failureThreshold in pod spec to prevent premature restarts during transient traffic spikes.\",\n      \"Investigate slow queries or leaked database connections causing pool exhaustion.\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\",\n      \"kubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\",\n      \"kubectl logs <pod_name> -n <namespace> --previous --tail=100\",\n      \"kubectl top pod <pod_name> -n <namespace>\"\n    ]\n  }\n}\n```"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "parts": [
+            {
+              "text": "The container restarted due to Kubelet liveness probe failure after connection pool exhaustion caused the health check endpoint /healthz to time out and return HTTP 500. Evidence includes timestamps of pool exhaustion and probe failure, with remediation targeting pool sizing and probe timeout adjustments."
+            }
+          ],
+          "role": "model"
+        }
+      },
+      "eval_case_id": "liveness_probe_investigation",
+      "agent_data": {
+        "agents": {
+          "k8s_investigator": {
+            "agent_id": "k8s_investigator",
+            "agent_type": "LlmAgent",
+            "description": "",
+            "instruction": "You are an expert Kubernetes Site Reliability Engineer (SRE) and Incident Investigation Agent.\nYour mission is to perform deep, evidence-based investigation of Kubernetes pod and container logs, diagnose root causes, extract chronological event timelines with supporting evidence, and provide actionable remediation.\n\nWhen presented with logs (raw text, snippets, or a file path):\n1. **Parse & Sanitize**: Call `parse_and_sanitize_logs` with the input logs. This masks any sensitive tokens/passwords, normalizes line numbers, and detects anomalous error entries and time bounds.\n2. **Diagnose & Match Signatures**: Call `match_k8s_signatures` on the anomalous lines or full log content. Correlate against Kubernetes failure patterns (e.g., OOMKilled exit code 137, Liveness/Readiness probe failures, CrashLoopBackOff, CoreDNS/network timeouts, missing ConfigMaps/Secrets, RBAC 403 forbidden, command not found 127, segmentation fault 139).\n3. **Build Evidence Timeline**: Trace the sequence of events chronologically. For each critical event, extract the exact timestamp and line number.\n4. **Compile Dual Report**: Call `generate_investigation_report` with the diagnosed root cause, category, severity, confidence score, timeline, evidence citations, remediation steps, and diagnostic kubectl commands.\n5. **Present Comprehensive Analysis**: Provide the user with the complete investigation report featuring:\n   - **Executive Summary & Root Cause Analysis (RCA)**: Clear, technically rigorous diagnosis explaining why the failure occurred.\n   - **Chronological Incident Timeline**: Ordered progression of events leading to the incident.\n   - **Supporting Evidence Table**: Exact line numbers, timestamps, raw log snippets, and engineering significance.\n   - **Actionable Remediation & Verification**: Step-by-step fix recommendations and ready-to-run `kubectl` diagnostic commands.\n   - **Structured JSON Payload**: Machine-readable output for programmatic automation.\n\nGuiding Principles:\n- **Strict Evidence Grounding**: Never fabricate or hallucinate log snippets, line numbers, or timestamps. Every citation must be strictly grounded in the parsed logs.\n- **Data Protection**: Ensure all bearer tokens, credentials, and API keys are redacted.\n- **Actionability**: Ensure kubectl verification commands include appropriate namespaces and resource selectors.\n",
+            "tools": [
+              {
+                "function_declarations": [
+                  {
+                    "description": "Parses raw Kubernetes logs, masks sensitive secrets, and extracts anomalous lines.\n\nArgs:\n    log_content: The raw text of the logs or an existing file path containing logs.\n\nReturns:\n    A dictionary containing parsed log statistics, time range, and anomalous log lines\n    with 1-indexed line numbers and stack trace associations.",
+                    "name": "parse_and_sanitize_logs",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "log_content": {
+                          "title": "Log Content",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "log_content"
+                      ],
+                      "title": "parse_and_sanitize_logsParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              },
+              {
+                "function_declarations": [
+                  {
+                    "description": "Correlates logs against known Kubernetes failure signatures and diagnostic patterns.\n\nArgs:\n    log_content: The text of the logs or anomalous lines to diagnose.\n\nReturns:\n    A dictionary containing matched signatures, diagnosed category, root cause,\n    severity level, confidence score, and recommended kubectl diagnostic commands.",
+                    "name": "match_k8s_signatures",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "log_content": {
+                          "title": "Log Content",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "log_content"
+                      ],
+                      "title": "match_k8s_signaturesParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              },
+              {
+                "function_declarations": [
+                  {
+                    "description": "Builds the comprehensive dual-format investigation report (Markdown and structured JSON).\n\nArgs:\n    incident_title: Concise title of the investigated incident.\n    root_cause: Detailed explanation of the diagnosed root cause.\n    category: Kubernetes failure category.\n    severity: Severity level (e.g. CRITICAL, HIGH, MEDIUM, LOW).\n    confidence_score: Diagnostic confidence between 0.0 and 1.0.\n    timeline_json: JSON string of chronological events: list of dicts with timestamp, line_number, event.\n    evidence_citations_json: JSON string of supporting evidence: list of dicts with line_number, timestamp, snippet, interpretation.\n    remediation_steps_json: JSON string of actionable remediation steps: list of strings.\n    kubectl_commands_json: JSON string of recommended kubectl commands: list of strings.\n\nReturns:\n    A dictionary containing both the human-readable Markdown report and the machine-readable structured JSON.",
+                    "name": "generate_investigation_report",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "incident_title": {
+                          "title": "Incident Title",
+                          "type": "string"
+                        },
+                        "root_cause": {
+                          "title": "Root Cause",
+                          "type": "string"
+                        },
+                        "category": {
+                          "title": "Category",
+                          "type": "string"
+                        },
+                        "severity": {
+                          "title": "Severity",
+                          "type": "string"
+                        },
+                        "confidence_score": {
+                          "title": "Confidence Score",
+                          "type": "number"
+                        },
+                        "timeline_json": {
+                          "title": "Timeline Json",
+                          "type": "string"
+                        },
+                        "evidence_citations_json": {
+                          "title": "Evidence Citations Json",
+                          "type": "string"
+                        },
+                        "remediation_steps_json": {
+                          "title": "Remediation Steps Json",
+                          "type": "string"
+                        },
+                        "kubectl_commands_json": {
+                          "title": "Kubectl Commands Json",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "incident_title",
+                        "root_cause",
+                        "category",
+                        "severity",
+                        "confidence_score",
+                        "timeline_json",
+                        "evidence_citations_json",
+                        "remediation_steps_json",
+                        "kubectl_commands_json"
+                      ],
+                      "title": "generate_investigation_reportParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              }
+            ],
+            "sub_agents": []
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "turn_id": "turn_0",
+            "events": [
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_52266",
+                        "args": {
+                          "log_content": "[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\n[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500"
+                        },
+                        "name": "parse_and_sanitize_logs"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:05:10.387788Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_52266",
+                        "name": "parse_and_sanitize_logs",
+                        "response": {
+                          "status": "success",
+                          "source": "raw_text",
+                          "total_lines": 3,
+                          "error_count": 1,
+                          "warning_count": 1,
+                          "time_range": {
+                            "start": "2026-09-26T11:00:10Z",
+                            "end": "2026-09-26T11:00:30Z"
+                          },
+                          "anomalous_count": 3,
+                          "anomalous_lines": [
+                            {
+                              "line_number": 1,
+                              "timestamp": "2026-09-26T11:00:10Z",
+                              "level": "WARNING",
+                              "snippet": "[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections..."
+                            },
+                            {
+                              "line_number": 2,
+                              "timestamp": "2026-09-26T11:00:25Z",
+                              "level": "ERROR",
+                              "snippet": "[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms"
+                            },
+                            {
+                              "line_number": 3,
+                              "timestamp": "2026-09-26T11:00:30Z",
+                              "level": "UNKNOWN",
+                              "snippet": "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500"
+                            }
+                          ],
+                          "sanitized_summary": "Parsed 3 lines (1 errors, 1 warnings). Detected 3 anomalous entries between 2026-09-26T11:00:10Z and 2026-09-26T11:00:30Z."
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:05:15.138397Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_2017497",
+                        "args": {
+                          "log_content": "[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\n[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500"
+                        },
+                        "name": "match_k8s_signatures"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:05:15.140462Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_2017497",
+                        "name": "match_k8s_signatures",
+                        "response": {
+                          "status": "matched",
+                          "primary_diagnosis": {
+                            "category": "Health Check / Liveness Probe",
+                            "severity": "HIGH",
+                            "root_cause": "Kubelet liveness probe failed or timed out, triggering an automatic container restart.",
+                            "confidence": 0.95,
+                            "remediation": [
+                              "Verify whether the application health endpoint is performing heavy I/O or database queries during probe execution.",
+                              "Increase `timeoutSeconds` or `failureThreshold` in the liveness probe definition.",
+                              "Tune `initialDelaySeconds` to give the application sufficient startup headroom."
+                            ],
+                            "kubectl_commands": [
+                              "kubectl describe pod <pod_name> -n <namespace> | grep -A 8 'Liveness:'",
+                              "kubectl get events -n <namespace> --field-selector reason=Unhealthy"
+                            ]
+                          },
+                          "all_matches": [
+                            {
+                              "rule_id": "LIVENESS_PROBE_FAILURE",
+                              "category": "Health Check / Liveness Probe",
+                              "severity": "HIGH",
+                              "root_cause": "Kubelet liveness probe failed or timed out, triggering an automatic container restart.",
+                              "confidence": 0.95,
+                              "evidence_count": 1,
+                              "matched_lines": [
+                                {
+                                  "line_number": 3,
+                                  "snippet": "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500"
+                                }
+                              ],
+                              "kubectl_commands": [
+                                "kubectl describe pod <pod_name> -n <namespace> | grep -A 8 'Liveness:'",
+                                "kubectl get events -n <namespace> --field-selector reason=Unhealthy"
+                              ],
+                              "remediation": [
+                                "Verify whether the application health endpoint is performing heavy I/O or database queries during probe execution.",
+                                "Increase `timeoutSeconds` or `failureThreshold` in the liveness probe definition.",
+                                "Tune `initialDelaySeconds` to give the application sufficient startup headroom."
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:05:17.286927Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_143313",
+                        "args": {
+                          "confidence_score": 0.95,
+                          "category": "Health Check / Liveness Probe Failure (Connection Pool Exhaustion)",
+                          "incident_title": "Liveness Probe Failure Triggered by Connection Pool Exhaustion",
+                          "root_cause": "Connection pool exhaustion starved application worker threads and downstream resources, causing the /healthz endpoint to time out and return an HTTP 500 error. The Kubelet flagged the container as unhealthy, failing the liveness probe and initiating container restart.",
+                          "kubectl_commands_json": "[\n  \"kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\",\n  \"kubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\",\n  \"kubectl logs <pod_name> -n <namespace> --previous --tail=100\",\n  \"kubectl top pod <pod_name> -n <namespace>\"\n]",
+                          "evidence_citations_json": "[\n  {\"line_number\": 1, \"timestamp\": \"2026-09-26T11:00:10Z\", \"snippet\": \"[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\", \"interpretation\": \"Downstream connection pool capacity reached saturation; subsequent requests queued waiting for available connections.\"},\n  {\"line_number\": 2, \"timestamp\": \"2026-09-26T11:00:25Z\", \"snippet\": \"[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\", \"interpretation\": \"Internal health check endpoint (/healthz) stalled and timed out after 5000ms due to waiting on pool connections or worker threads.\"},\n  {\"line_number\": 3, \"timestamp\": \"2026-09-26T11:00:30Z\", \"snippet\": \"[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\", \"interpretation\": \"Kubelet liveness probe evaluation failed with HTTP status 500, marking the container unhealthy and scheduling container restart.\"}\n]",
+                          "remediation_steps_json": "[\n  \"Decouple /healthz liveness probe from external downstream dependencies or connection pools (use shallow liveness checks for process vitality).\",\n  \"Adjust connection pool sizing (maximum pool size, connection timeout, and idle timeout) or scale pod replicas horizontally (HPA) to distribute load.\",\n  \"Tune probe timeoutSeconds and failureThreshold in pod spec to prevent premature restarts during transient traffic spikes.\",\n  \"Investigate slow queries or leaked database connections causing pool exhaustion.\"\n]",
+                          "timeline_json": "[\n  {\"timestamp\": \"2026-09-26T11:00:10Z\", \"line_number\": 1, \"event\": \"Connection pool exhausted; application begins queuing requests waiting for free connections\"},\n  {\"timestamp\": \"2026-09-26T11:00:25Z\", \"line_number\": 2, \"event\": \"Internal GET /healthz check fails due to 5000ms timeout\"},\n  {\"timestamp\": \"2026-09-26T11:00:30Z\", \"line_number\": 3, \"event\": \"Kubelet liveness probe reports HTTP 500 failure, marking container unhealthy\"}\n]",
+                          "severity": "HIGH"
+                        },
+                        "name": "generate_investigation_report"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:05:17.290165Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_143313",
+                        "name": "generate_investigation_report",
+                        "response": {
+                          "status": "success",
+                          "markdown_report": "# Kubernetes Incident Investigation Report: Liveness Probe Failure Triggered by Connection Pool Exhaustion\n\n**Severity:** `HIGH` | **Category:** `Health Check / Liveness Probe Failure (Connection Pool Exhaustion)` | **Confidence:** `95%` | **Generated:** `2026-09-26T15:05:49Z`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis\n\nConnection pool exhaustion starved application worker threads and downstream resources, causing the /healthz endpoint to time out and return an HTTP 500 error. The Kubelet flagged the container as unhealthy, failing the liveness probe and initiating container restart.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Line | Event Description |\n| :--- | :--- | :--- |\n| `2026-09-26T11:00:10Z` | Line 1 | Connection pool exhausted; application begins queuing requests waiting for free connections |\n| `2026-09-26T11:00:25Z` | Line 2 | Internal GET /healthz check fails due to 5000ms timeout |\n| `2026-09-26T11:00:30Z` | Line 3 | Kubelet liveness probe reports HTTP 500 failure, marking container unhealthy |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | Significance |\n| :--- | :--- | :--- | :--- |\n| `1` | `2026-09-26T11:00:10Z` | `[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...` | Downstream connection pool capacity reached saturation; subsequent requests queued waiting for available connections. |\n| `2` | `2026-09-26T11:00:25Z` | `[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms` | Internal health check endpoint (/healthz) stalled and timed out after 5000ms due to waiting on pool connections or worker threads. |\n| `3` | `2026-09-26T11:00:30Z` | `[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500` | Kubelet liveness probe evaluation failed with HTTP status 500, marking the container unhealthy and scheduling container restart. |\n\n---\n\n## 4. Recommended Action Plan & Remediation\n\n1. Decouple /healthz liveness probe from external downstream dependencies or connection pools (use shallow liveness checks for process vitality).\n2. Adjust connection pool sizing (maximum pool size, connection timeout, and idle timeout) or scale pod replicas horizontally (HPA) to distribute load.\n3. Tune probe timeoutSeconds and failureThreshold in pod spec to prevent premature restarts during transient traffic spikes.\n4. Investigate slow queries or leaked database connections causing pool exhaustion.\n\n### Diagnostic & Verification Commands\n```bash\nkubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\nkubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\nkubectl logs <pod_name> -n <namespace> --previous --tail=100\nkubectl top pod <pod_name> -n <namespace>\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210549\",\n  \"title\": \"Liveness Probe Failure Triggered by Connection Pool Exhaustion\",\n  \"investigation_timestamp\": \"2026-09-26T15:05:49Z\",\n  \"classification\": {\n    \"category\": \"Health Check / Liveness Probe Failure (Connection Pool Exhaustion)\",\n    \"severity\": \"HIGH\",\n    \"confidence\": 0.95\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"Connection pool exhaustion starved application worker threads and downstream resources, causing the /healthz endpoint to time out and return an HTTP 500 error. The Kubelet flagged the container as unhealthy, failing the liveness probe and initiating container restart.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T11:00:10Z\",\n      \"line_number\": 1,\n      \"event\": \"Connection pool exhausted; application begins queuing requests waiting for free connections\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T11:00:25Z\",\n      \"line_number\": 2,\n      \"event\": \"Internal GET /healthz check fails due to 5000ms timeout\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T11:00:30Z\",\n      \"line_number\": 3,\n      \"event\": \"Kubelet liveness probe reports HTTP 500 failure, marking container unhealthy\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T11:00:10Z\",\n      \"snippet\": \"[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\",\n      \"interpretation\": \"Downstream connection pool capacity reached saturation; subsequent requests queued waiting for available connections.\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T11:00:25Z\",\n      \"snippet\": \"[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\",\n      \"interpretation\": \"Internal health check endpoint (/healthz) stalled and timed out after 5000ms due to waiting on pool connections or worker threads.\"\n    },\n    {\n      \"line_number\": 3,\n      \"timestamp\": \"2026-09-26T11:00:30Z\",\n      \"snippet\": \"[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\",\n      \"interpretation\": \"Kubelet liveness probe evaluation failed with HTTP status 500, marking the container unhealthy and scheduling container restart.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Decouple /healthz liveness probe from external downstream dependencies or connection pools (use shallow liveness checks for process vitality).\",\n      \"Adjust connection pool sizing (maximum pool size, connection timeout, and idle timeout) or scale pod replicas horizontally (HPA) to distribute load.\",\n      \"Tune probe timeoutSeconds and failureThreshold in pod spec to prevent premature restarts during transient traffic spikes.\",\n      \"Investigate slow queries or leaked database connections causing pool exhaustion.\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\",\n      \"kubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\",\n      \"kubectl logs <pod_name> -n <namespace> --previous --tail=100\",\n      \"kubectl top pod <pod_name> -n <namespace>\"\n    ]\n  }\n}\n```",
+                          "structured_json": {
+                            "incident_id": "k8s-inc-20260926-210549",
+                            "title": "Liveness Probe Failure Triggered by Connection Pool Exhaustion",
+                            "investigation_timestamp": "2026-09-26T15:05:49Z",
+                            "classification": {
+                              "category": "Health Check / Liveness Probe Failure (Connection Pool Exhaustion)",
+                              "severity": "HIGH",
+                              "confidence": 0.95
+                            },
+                            "root_cause_analysis": {
+                              "summary": "Connection pool exhaustion starved application worker threads and downstream resources, causing the /healthz endpoint to time out and return an HTTP 500 error. The Kubelet flagged the container as unhealthy, failing the liveness probe and initiating container restart."
+                            },
+                            "timeline": [
+                              {
+                                "timestamp": "2026-09-26T11:00:10Z",
+                                "line_number": 1,
+                                "event": "Connection pool exhausted; application begins queuing requests waiting for free connections"
+                              },
+                              {
+                                "timestamp": "2026-09-26T11:00:25Z",
+                                "line_number": 2,
+                                "event": "Internal GET /healthz check fails due to 5000ms timeout"
+                              },
+                              {
+                                "timestamp": "2026-09-26T11:00:30Z",
+                                "line_number": 3,
+                                "event": "Kubelet liveness probe reports HTTP 500 failure, marking container unhealthy"
+                              }
+                            ],
+                            "evidence_citations": [
+                              {
+                                "line_number": 1,
+                                "timestamp": "2026-09-26T11:00:10Z",
+                                "snippet": "[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...",
+                                "interpretation": "Downstream connection pool capacity reached saturation; subsequent requests queued waiting for available connections."
+                              },
+                              {
+                                "line_number": 2,
+                                "timestamp": "2026-09-26T11:00:25Z",
+                                "snippet": "[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms",
+                                "interpretation": "Internal health check endpoint (/healthz) stalled and timed out after 5000ms due to waiting on pool connections or worker threads."
+                              },
+                              {
+                                "line_number": 3,
+                                "timestamp": "2026-09-26T11:00:30Z",
+                                "snippet": "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500",
+                                "interpretation": "Kubelet liveness probe evaluation failed with HTTP status 500, marking the container unhealthy and scheduling container restart."
+                              }
+                            ],
+                            "remediation_plan": {
+                              "steps": [
+                                "Decouple /healthz liveness probe from external downstream dependencies or connection pools (use shallow liveness checks for process vitality).",
+                                "Adjust connection pool sizing (maximum pool size, connection timeout, and idle timeout) or scale pod replicas horizontally (HPA) to distribute load.",
+                                "Tune probe timeoutSeconds and failureThreshold in pod spec to prevent premature restarts during transient traffic spikes.",
+                                "Investigate slow queries or leaked database connections causing pool exhaustion."
+                              ],
+                              "kubectl_commands": [
+                                "kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'",
+                                "kubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'",
+                                "kubectl logs <pod_name> -n <namespace> --previous --tail=100",
+                                "kubectl top pod <pod_name> -n <namespace>"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:05:49.290537Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "text": "# Kubernetes Incident Investigation Report: Liveness Probe Failure Triggered by Connection Pool Exhaustion\n\n**Severity:** `HIGH` | **Category:** `Health Check / Liveness Probe Failure (Connection Pool Exhaustion)` | **Confidence Score:** `0.95 (95%)`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis (RCA)\n\n### Diagnosis\nConnection pool exhaustion within the application starved worker threads and downstream resources. As a direct consequence, the application's `/healthz` endpoint failed to respond within its 5-second (5000ms) threshold, triggering an internal timeout and returning an HTTP 500 error. The Kubelet liveness probe caught this 500 status code, declared the container unhealthy, and scheduled an automatic container termination/restart.\n\n### Mechanism of Failure\n1. **Saturation**: At `11:00:10Z`, the application depleted its available downstream connection pool (e.g., database or upstream service connections), causing subsequent incoming requests to stall in a wait queue.\n2. **Health Check Starvation**: At `11:00:25Z`, an internal request to `/healthz` exceeded its 5000ms timeout threshold, likely because the endpoint either actively verified downstream connectivity against an exhausted pool or had its servicing thread blocked.\n3. **Probe Breach**: At `11:00:30Z`, Kubelet's periodic liveness probe queried the endpoint, received the HTTP 500 error response, and registered an unhealthy failure state.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Line Number | Event Progression |\n| :--- | :--- | :--- |\n| **2026-09-26T11:00:10Z** | Line 1 | Application triggers warning: Connection pool exhausted; incoming requests queued. |\n| **2026-09-26T11:00:25Z** | Line 2 | Application health endpoint (`GET /healthz`) times out after 5000ms. |\n| **2026-09-26T11:00:30Z** | Line 3 | Kubelet marks liveness probe as failed with HTTP status 500, scheduling pod restart. |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | SRE Interpretation & Significance |\n| :---: | :--- | :--- | :--- |\n| `1` | `2026-09-26T11:00:10Z` | `[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...` | Identifies the initiating bottleneck: pool capacity reached 100% saturation. |\n| `2` | `2026-09-26T11:00:25Z` | `[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms` | Direct cascading failure: `/healthz` health verification stalled due to pool exhaustion or thread starvation. |\n| `3` | `2026-09-26T11:00:30Z` | `[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500` | The failure manifests at the Kubernetes orchestration level, triggering node-level restart semantics. |\n\n---\n\n## 4. Remediation Plan & Next Steps\n\n### Immediate Actions\n1. **Decouple Liveness from Downstream Health**:\n   - Ensure the **liveness probe** (`/healthz` or `/livez`) only checks local process health (e.g., event loop responsive, HTTP server listening).\n   - Use a **readiness probe** (`/readyz`) for checking external connectivity (e.g., database reachability), so that connection pool stalls take the pod out of the Service endpoints rather than killing the process.\n2. **Review Connection Pool Sizing**:\n   - Adjust `max_connections`, acquire timeout, and idle connection reap parameters in the application configuration.\n3. **Scale Horizontally (HPA)**:\n   - If pool exhaustion is traffic-driven, scale out pod replicas and tune downstream connection pool limits accordingly.\n\n### Diagnostic & Verification Commands\n```bash\n# 1. Inspect probe configuration and recent failure events on the pod\nkubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\n\n# 2. View unhealthy probe events across the namespace\nkubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\n\n# 3. Inspect previous container logs prior to the restart\nkubectl logs <pod_name> -n <namespace> --previous --tail=100\n\n# 4. Check pod resource consumption (CPU/Memory starvation)\nkubectl top pod <pod_name> -n <namespace>\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210549\",\n  \"title\": \"Liveness Probe Failure Triggered by Connection Pool Exhaustion\",\n  \"investigation_timestamp\": \"2026-09-26T15:05:49Z\",\n  \"classification\": {\n    \"category\": \"Health Check / Liveness Probe Failure (Connection Pool Exhaustion)\",\n    \"severity\": \"HIGH\",\n    \"confidence\": 0.95\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"Connection pool exhaustion starved application worker threads and downstream resources, causing the /healthz endpoint to time out and return an HTTP 500 error. The Kubelet flagged the container as unhealthy, failing the liveness probe and initiating container restart.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T11:00:10Z\",\n      \"line_number\": 1,\n      \"event\": \"Connection pool exhausted; application begins queuing requests waiting for free connections\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T11:00:25Z\",\n      \"line_number\": 2,\n      \"event\": \"Internal GET /healthz check fails due to 5000ms timeout\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T11:00:30Z\",\n      \"line_number\": 3,\n      \"event\": \"Kubelet liveness probe reports HTTP 500 failure, marking container unhealthy\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T11:00:10Z\",\n      \"snippet\": \"[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\",\n      \"interpretation\": \"Downstream connection pool capacity reached saturation; subsequent requests queued waiting for available connections.\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T11:00:25Z\",\n      \"snippet\": \"[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\",\n      \"interpretation\": \"Internal health check endpoint (/healthz) stalled and timed out after 5000ms due to waiting on pool connections or worker threads.\"\n    },\n    {\n      \"line_number\": 3,\n      \"timestamp\": \"2026-09-26T11:00:30Z\",\n      \"snippet\": \"[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\",\n      \"interpretation\": \"Kubelet liveness probe evaluation failed with HTTP status 500, marking the container unhealthy and scheduling container restart.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Decouple /healthz liveness probe from external downstream dependencies or connection pools (use shallow liveness checks for process vitality).\",\n      \"Adjust connection pool sizing (maximum pool size, connection timeout, and idle timeout) or scale pod replicas horizontally (HPA) to distribute load.\",\n      \"Tune probe timeoutSeconds and failureThreshold in pod spec to prevent premature restarts during transient traffic spikes.\",\n      \"Investigate slow queries or leaked database connections causing pool exhaustion.\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Liveness:'\",\n      \"kubectl get events -n <namespace> --field-selector reason=Unhealthy --sort-by='.metadata.creationTimestamp'\",\n      \"kubectl logs <pod_name> -n <namespace> --previous --tail=100\",\n      \"kubectl top pod <pod_name> -n <namespace>\"\n    ]\n  }\n}\n```"
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:05:49.306446Z"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "prompt": {
+        "parts": [
+          {
+            "text": "Investigate the following error log and provide root cause, evidence timeline, and fix commands:\n[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure"
+          }
+        ],
+        "role": "user"
+      },
+      "responses": [
+        {
+          "response": {
+            "parts": [
+              {
+                "text": "# Kubernetes Incident Investigation: Upstream DNS Resolution Failure\n\n**Severity:** `HIGH`  \n**Category:** `Networking / CoreDNS`  \n**Diagnostic Confidence:** `93%`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis\n\n**Root Cause:**  \nCluster DNS lookup failure (`NXDOMAIN` / `no such host`) when attempting to resolve the upstream Kubernetes service `payment-service.default.svc.cluster.local` via the cluster DNS resolver (`10.96.0.10:53`). \n\nThis typically indicates one of the following:\n1. **Missing Service Resource**: The Service `payment-service` does not exist in the `default` namespace.\n2. **Namespace Mismatch**: The service exists in a non-default namespace (e.g., `payments`, `prod`), but the client application queried `payment-service.default.svc.cluster.local` or omitted the namespace qualifier while running in `default`.\n3. **CoreDNS Outage or Degradation**: CoreDNS pods in `kube-system` are crashing, unready, or unable to process queries.\n4. **Network Policy**: An egress policy on the client pod or an ingress policy on CoreDNS is blocking UDP/TCP port 53.\n\nAs a direct consequence, the application failed to establish a TCP connection, leading to a critical transaction abort in the checkout flow.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Log Line | Event Description |\n| :--- | :---: | :--- |\n| `2026-09-26T12:05:01Z` | Line 1 | **DNS Query Failed**: Container attempted to resolve `payment-service.default.svc.cluster.local` via DNS server `10.96.0.10:53`, receiving `no such host`. |\n| `2026-09-26T12:05:02Z` | Line 2 | **Transaction Failure**: Application halted the checkout transaction due to upstream resolution failure. |\n\n---\n\n## 3. Supporting Evidence Citations\n\n| Line | Timestamp | Raw Log Snippet | Diagnostic Significance |\n| :---: | :--- | :--- | :--- |\n| **1** | `2026-09-26T12:05:01Z` | `[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host` | Pinpoints target FQDN (`payment-service.default.svc.cluster.local`), cluster DNS resolver IP (`10.96.0.10`), port (`53`), and exact resolver response (`no such host`). |\n| **2** | `2026-09-26T12:05:02Z` | `[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure` | Direct downstream business impact confirming broken dependency on the payment service. |\n\n---\n\n## 4. Remediation Plan & Diagnostic Commands\n\n### Step-by-Step Fix Actions:\n1. **Check Service Existence in Target Namespace**:\n   Confirm whether `payment-service` exists in the `default` namespace:\n   ```bash\n   kubectl get svc payment-service -n default\n   ```\n2. **Locate Target Service Across Cluster**:\n   If the service is not in `default`, check if it exists in another namespace:\n   ```bash\n   kubectl get svc -A | grep payment\n   ```\n   *Action:* If it resides in another namespace (e.g., `payments`), update the client application's configuration or environment variable to target `payment-service.payments.svc.cluster.local`.\n\n3. **Verify CoreDNS Health**:\n   Ensure CoreDNS pods are running and inspect their logs for forwarder or synchronization errors:\n   ```bash\n   kubectl get pods -n kube-system -l k8s-app=kube-dns\n   kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\n   ```\n\n4. **Verify Pod DNS In-Cluster**:\n   Execute an inline lookup from the calling pod:\n   ```bash\n   kubectl exec -it <client-pod> -n default -- nslookup payment-service.default.svc.cluster.local\n   kubectl exec -it <client-pod> -n default -- cat /etc/resolv.conf\n   ```\n\n5. **Inspect Network Policies**:\n   Verify whether an egress NetworkPolicy is blocking DNS traffic on port 53:\n   ```bash\n   kubectl get networkpolicies -n default\n   ```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210629\",\n  \"title\": \"Upstream DNS Resolution Failure for payment-service in default namespace\",\n  \"investigation_timestamp\": \"2026-09-26T15:06:29Z\",\n  \"classification\": {\n    \"category\": \"Networking / CoreDNS\",\n    \"severity\": \"HIGH\",\n    \"confidence\": 0.93\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"Cluster DNS resolution failure (NXDOMAIN / 'no such host') when attempting to resolve 'payment-service.default.svc.cluster.local' via kube-dns at 10.96.0.10:53. The target Service does not exist in the 'default' namespace, is deployed under a different namespace, or CoreDNS is unable to resolve the record.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T12:05:01Z\",\n      \"line_number\": 1,\n      \"event\": \"TCP dial error: DNS query to 10.96.0.10:53 for 'payment-service.default.svc.cluster.local' returned 'no such host'.\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T12:05:02Z\",\n      \"line_number\": 2,\n      \"event\": \"Application checkout transaction aborted due to upstream resolution failure.\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T12:05:01Z\",\n      \"snippet\": \"[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\",\n      \"interpretation\": \"DNS resolution query to cluster DNS (10.96.0.10:53) for FQDN payment-service.default.svc.cluster.local failed with NXDOMAIN ('no such host').\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T12:05:02Z\",\n      \"snippet\": \"[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure\",\n      \"interpretation\": \"Application transaction processing aborted due to failure resolving the upstream payment service hostname.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Verify whether the 'payment-service' Service exists in the 'default' namespace using 'kubectl get svc payment-service -n default'.\",\n      \"If 'payment-service' is deployed in another namespace (e.g., 'payments' or 'production'), update application configuration to use the correct FQDN: 'payment-service.<target-namespace>.svc.cluster.local'.\",\n      \"If the Service is missing entirely, deploy or restore the Service manifest pointing to the payment service pods.\",\n      \"Check CoreDNS pod health and logs in 'kube-system' to ensure cluster DNS is functioning properly.\",\n      \"Check if any NetworkPolicies restrict egress from the client pod to CoreDNS (port 53 UDP/TCP).\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl get svc payment-service -n default\",\n      \"kubectl get svc -A | grep payment\",\n      \"kubectl get pods -n kube-system -l k8s-app=kube-dns\",\n      \"kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\",\n      \"kubectl exec -it <client-pod> -- nslookup payment-service.default.svc.cluster.local\"\n    ]\n  }\n}\n```"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "parts": [
+            {
+              "text": "The incident was caused by internal DNS resolution failure for payment-service.default.svc.cluster.local. Evidence includes dial tcp lookup error on port 53. Remediation involves checking the payment service definition and inspecting CoreDNS pods."
+            }
+          ],
+          "role": "model"
+        }
+      },
+      "eval_case_id": "coredns_network_investigation",
+      "agent_data": {
+        "agents": {
+          "k8s_investigator": {
+            "agent_id": "k8s_investigator",
+            "agent_type": "LlmAgent",
+            "description": "",
+            "instruction": "You are an expert Kubernetes Site Reliability Engineer (SRE) and Incident Investigation Agent.\nYour mission is to perform deep, evidence-based investigation of Kubernetes pod and container logs, diagnose root causes, extract chronological event timelines with supporting evidence, and provide actionable remediation.\n\nWhen presented with logs (raw text, snippets, or a file path):\n1. **Parse & Sanitize**: Call `parse_and_sanitize_logs` with the input logs. This masks any sensitive tokens/passwords, normalizes line numbers, and detects anomalous error entries and time bounds.\n2. **Diagnose & Match Signatures**: Call `match_k8s_signatures` on the anomalous lines or full log content. Correlate against Kubernetes failure patterns (e.g., OOMKilled exit code 137, Liveness/Readiness probe failures, CrashLoopBackOff, CoreDNS/network timeouts, missing ConfigMaps/Secrets, RBAC 403 forbidden, command not found 127, segmentation fault 139).\n3. **Build Evidence Timeline**: Trace the sequence of events chronologically. For each critical event, extract the exact timestamp and line number.\n4. **Compile Dual Report**: Call `generate_investigation_report` with the diagnosed root cause, category, severity, confidence score, timeline, evidence citations, remediation steps, and diagnostic kubectl commands.\n5. **Present Comprehensive Analysis**: Provide the user with the complete investigation report featuring:\n   - **Executive Summary & Root Cause Analysis (RCA)**: Clear, technically rigorous diagnosis explaining why the failure occurred.\n   - **Chronological Incident Timeline**: Ordered progression of events leading to the incident.\n   - **Supporting Evidence Table**: Exact line numbers, timestamps, raw log snippets, and engineering significance.\n   - **Actionable Remediation & Verification**: Step-by-step fix recommendations and ready-to-run `kubectl` diagnostic commands.\n   - **Structured JSON Payload**: Machine-readable output for programmatic automation.\n\nGuiding Principles:\n- **Strict Evidence Grounding**: Never fabricate or hallucinate log snippets, line numbers, or timestamps. Every citation must be strictly grounded in the parsed logs.\n- **Data Protection**: Ensure all bearer tokens, credentials, and API keys are redacted.\n- **Actionability**: Ensure kubectl verification commands include appropriate namespaces and resource selectors.\n",
+            "tools": [
+              {
+                "function_declarations": [
+                  {
+                    "description": "Parses raw Kubernetes logs, masks sensitive secrets, and extracts anomalous lines.\n\nArgs:\n    log_content: The raw text of the logs or an existing file path containing logs.\n\nReturns:\n    A dictionary containing parsed log statistics, time range, and anomalous log lines\n    with 1-indexed line numbers and stack trace associations.",
+                    "name": "parse_and_sanitize_logs",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "log_content": {
+                          "title": "Log Content",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "log_content"
+                      ],
+                      "title": "parse_and_sanitize_logsParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              },
+              {
+                "function_declarations": [
+                  {
+                    "description": "Correlates logs against known Kubernetes failure signatures and diagnostic patterns.\n\nArgs:\n    log_content: The text of the logs or anomalous lines to diagnose.\n\nReturns:\n    A dictionary containing matched signatures, diagnosed category, root cause,\n    severity level, confidence score, and recommended kubectl diagnostic commands.",
+                    "name": "match_k8s_signatures",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "log_content": {
+                          "title": "Log Content",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "log_content"
+                      ],
+                      "title": "match_k8s_signaturesParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              },
+              {
+                "function_declarations": [
+                  {
+                    "description": "Builds the comprehensive dual-format investigation report (Markdown and structured JSON).\n\nArgs:\n    incident_title: Concise title of the investigated incident.\n    root_cause: Detailed explanation of the diagnosed root cause.\n    category: Kubernetes failure category.\n    severity: Severity level (e.g. CRITICAL, HIGH, MEDIUM, LOW).\n    confidence_score: Diagnostic confidence between 0.0 and 1.0.\n    timeline_json: JSON string of chronological events: list of dicts with timestamp, line_number, event.\n    evidence_citations_json: JSON string of supporting evidence: list of dicts with line_number, timestamp, snippet, interpretation.\n    remediation_steps_json: JSON string of actionable remediation steps: list of strings.\n    kubectl_commands_json: JSON string of recommended kubectl commands: list of strings.\n\nReturns:\n    A dictionary containing both the human-readable Markdown report and the machine-readable structured JSON.",
+                    "name": "generate_investigation_report",
+                    "parameters_json_schema": {
+                      "properties": {
+                        "incident_title": {
+                          "title": "Incident Title",
+                          "type": "string"
+                        },
+                        "root_cause": {
+                          "title": "Root Cause",
+                          "type": "string"
+                        },
+                        "category": {
+                          "title": "Category",
+                          "type": "string"
+                        },
+                        "severity": {
+                          "title": "Severity",
+                          "type": "string"
+                        },
+                        "confidence_score": {
+                          "title": "Confidence Score",
+                          "type": "number"
+                        },
+                        "timeline_json": {
+                          "title": "Timeline Json",
+                          "type": "string"
+                        },
+                        "evidence_citations_json": {
+                          "title": "Evidence Citations Json",
+                          "type": "string"
+                        },
+                        "remediation_steps_json": {
+                          "title": "Remediation Steps Json",
+                          "type": "string"
+                        },
+                        "kubectl_commands_json": {
+                          "title": "Kubectl Commands Json",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "incident_title",
+                        "root_cause",
+                        "category",
+                        "severity",
+                        "confidence_score",
+                        "timeline_json",
+                        "evidence_citations_json",
+                        "remediation_steps_json",
+                        "kubectl_commands_json"
+                      ],
+                      "title": "generate_investigation_reportParams",
+                      "type": "object"
+                    },
+                    "response_json_schema": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  }
+                ]
+              }
+            ],
+            "sub_agents": []
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "turn_id": "turn_0",
+            "events": [
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_141178",
+                        "args": {
+                          "log_content": "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure"
+                        },
+                        "name": "parse_and_sanitize_logs"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:06:05.588058Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_141178",
+                        "name": "parse_and_sanitize_logs",
+                        "response": {
+                          "status": "success",
+                          "source": "raw_text",
+                          "total_lines": 2,
+                          "error_count": 2,
+                          "warning_count": 0,
+                          "time_range": {
+                            "start": "2026-09-26T12:05:01Z",
+                            "end": "2026-09-26T12:05:02Z"
+                          },
+                          "anomalous_count": 2,
+                          "anomalous_lines": [
+                            {
+                              "line_number": 1,
+                              "timestamp": "2026-09-26T12:05:01Z",
+                              "level": "ERROR",
+                              "snippet": "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host"
+                            },
+                            {
+                              "line_number": 2,
+                              "timestamp": "2026-09-26T12:05:02Z",
+                              "level": "CRITICAL",
+                              "snippet": "[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure"
+                            }
+                          ],
+                          "sanitized_summary": "Parsed 2 lines (2 errors, 0 warnings). Detected 2 anomalous entries between 2026-09-26T12:05:01Z and 2026-09-26T12:05:02Z."
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:06:13.313631Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_796290",
+                        "args": {
+                          "log_content": "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure"
+                        },
+                        "name": "match_k8s_signatures"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:06:13.316969Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_796290",
+                        "name": "match_k8s_signatures",
+                        "response": {
+                          "status": "matched",
+                          "primary_diagnosis": {
+                            "category": "Networking / CoreDNS",
+                            "severity": "HIGH",
+                            "root_cause": "Internal or external DNS resolution failed. The container could not resolve service hostnames.",
+                            "confidence": 0.93,
+                            "remediation": [
+                              "Verify the exact target service FQDN (`<service>.<namespace>.svc.cluster.local`).",
+                              "Confirm that CoreDNS pods in `kube-system` are Running and healthy.",
+                              "Check for NetworkPolicies restricting DNS traffic (UDP/TCP port 53)."
+                            ],
+                            "kubectl_commands": [
+                              "kubectl get pods -n kube-system -l k8s-app=kube-dns",
+                              "kubectl logs -n kube-system -l k8s-app=kube-dns --tail=50",
+                              "kubectl exec -it <pod_name> -n <namespace> -- cat /etc/resolv.conf"
+                            ]
+                          },
+                          "all_matches": [
+                            {
+                              "rule_id": "DNS_RESOLUTION_FAILURE",
+                              "category": "Networking / CoreDNS",
+                              "severity": "HIGH",
+                              "root_cause": "Internal or external DNS resolution failed. The container could not resolve service hostnames.",
+                              "confidence": 0.93,
+                              "evidence_count": 1,
+                              "matched_lines": [
+                                {
+                                  "line_number": 1,
+                                  "snippet": "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host"
+                                }
+                              ],
+                              "kubectl_commands": [
+                                "kubectl get pods -n kube-system -l k8s-app=kube-dns",
+                                "kubectl logs -n kube-system -l k8s-app=kube-dns --tail=50",
+                                "kubectl exec -it <pod_name> -n <namespace> -- cat /etc/resolv.conf"
+                              ],
+                              "remediation": [
+                                "Verify the exact target service FQDN (`<service>.<namespace>.svc.cluster.local`).",
+                                "Confirm that CoreDNS pods in `kube-system` are Running and healthy.",
+                                "Check for NetworkPolicies restricting DNS traffic (UDP/TCP port 53)."
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:06:15.358504Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "id": "call_2507857",
+                        "args": {
+                          "root_cause": "Cluster DNS resolution failure (NXDOMAIN / 'no such host') when attempting to resolve 'payment-service.default.svc.cluster.local' via kube-dns at 10.96.0.10:53. The target Service does not exist in the 'default' namespace, is deployed under a different namespace, or CoreDNS is unable to resolve the record.",
+                          "confidence_score": 0.93,
+                          "kubectl_commands_json": "[\n  \"kubectl get svc payment-service -n default\",\n  \"kubectl get svc -A | grep payment\",\n  \"kubectl get pods -n kube-system -l k8s-app=kube-dns\",\n  \"kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\",\n  \"kubectl exec -it <client-pod> -- nslookup payment-service.default.svc.cluster.local\"\n]",
+                          "category": "Networking / CoreDNS",
+                          "evidence_citations_json": "[\n  {\n    \"line_number\": 1,\n    \"timestamp\": \"2026-09-26T12:05:01Z\",\n    \"snippet\": \"[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\",\n    \"interpretation\": \"DNS resolution query to cluster DNS (10.96.0.10:53) for FQDN payment-service.default.svc.cluster.local failed with NXDOMAIN ('no such host').\"\n  },\n  {\n    \"line_number\": 2,\n    \"timestamp\": \"2026-09-26T12:05:02Z\",\n    \"snippet\": \"[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure\",\n    \"interpretation\": \"Application transaction processing aborted due to failure resolving the upstream payment service hostname.\"\n  }\n]",
+                          "severity": "HIGH",
+                          "incident_title": "Upstream DNS Resolution Failure for payment-service in default namespace",
+                          "remediation_steps_json": "[\n  \"Verify whether the 'payment-service' Service exists in the 'default' namespace using 'kubectl get svc payment-service -n default'.\",\n  \"If 'payment-service' is deployed in another namespace (e.g., 'payments' or 'production'), update application configuration to use the correct FQDN: 'payment-service.<target-namespace>.svc.cluster.local'.\",\n  \"If the Service is missing entirely, deploy or restore the Service manifest pointing to the payment service pods.\",\n  \"Check CoreDNS pod health and logs in 'kube-system' to ensure cluster DNS is functioning properly.\",\n  \"Check if any NetworkPolicies restrict egress from the client pod to CoreDNS (port 53 UDP/TCP).\"\n]",
+                          "timeline_json": "[\n  {\n    \"timestamp\": \"2026-09-26T12:05:01Z\",\n    \"line_number\": 1,\n    \"event\": \"TCP dial error: DNS query to 10.96.0.10:53 for 'payment-service.default.svc.cluster.local' returned 'no such host'.\"\n  },\n  {\n    \"timestamp\": \"2026-09-26T12:05:02Z\",\n    \"line_number\": 2,\n    \"event\": \"Application checkout transaction aborted due to upstream resolution failure.\"\n  }\n]"
+                        },
+                        "name": "generate_investigation_report"
+                      }
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:06:15.362421Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "id": "call_2507857",
+                        "name": "generate_investigation_report",
+                        "response": {
+                          "status": "success",
+                          "markdown_report": "# Kubernetes Incident Investigation Report: Upstream DNS Resolution Failure for payment-service in default namespace\n\n**Severity:** `HIGH` | **Category:** `Networking / CoreDNS` | **Confidence:** `93%` | **Generated:** `2026-09-26T15:06:29Z`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis\n\nCluster DNS resolution failure (NXDOMAIN / 'no such host') when attempting to resolve 'payment-service.default.svc.cluster.local' via kube-dns at 10.96.0.10:53. The target Service does not exist in the 'default' namespace, is deployed under a different namespace, or CoreDNS is unable to resolve the record.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Line | Event Description |\n| :--- | :--- | :--- |\n| `2026-09-26T12:05:01Z` | Line 1 | TCP dial error: DNS query to 10.96.0.10:53 for 'payment-service.default.svc.cluster.local' returned 'no such host'. |\n| `2026-09-26T12:05:02Z` | Line 2 | Application checkout transaction aborted due to upstream resolution failure. |\n\n---\n\n## 3. Supporting Evidence & Log Citations\n\n| Line | Timestamp | Raw Log Snippet | Significance |\n| :--- | :--- | :--- | :--- |\n| `1` | `2026-09-26T12:05:01Z` | `[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host` | DNS resolution query to cluster DNS (10.96.0.10:53) for FQDN payment-service.default.svc.cluster.local failed with NXDOMAIN ('no such host'). |\n| `2` | `2026-09-26T12:05:02Z` | `[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure` | Application transaction processing aborted due to failure resolving the upstream payment service hostname. |\n\n---\n\n## 4. Recommended Action Plan & Remediation\n\n1. Verify whether the 'payment-service' Service exists in the 'default' namespace using 'kubectl get svc payment-service -n default'.\n2. If 'payment-service' is deployed in another namespace (e.g., 'payments' or 'production'), update application configuration to use the correct FQDN: 'payment-service.<target-namespace>.svc.cluster.local'.\n3. If the Service is missing entirely, deploy or restore the Service manifest pointing to the payment service pods.\n4. Check CoreDNS pod health and logs in 'kube-system' to ensure cluster DNS is functioning properly.\n5. Check if any NetworkPolicies restrict egress from the client pod to CoreDNS (port 53 UDP/TCP).\n\n### Diagnostic & Verification Commands\n```bash\nkubectl get svc payment-service -n default\nkubectl get svc -A | grep payment\nkubectl get pods -n kube-system -l k8s-app=kube-dns\nkubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\nkubectl exec -it <client-pod> -- nslookup payment-service.default.svc.cluster.local\n```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210629\",\n  \"title\": \"Upstream DNS Resolution Failure for payment-service in default namespace\",\n  \"investigation_timestamp\": \"2026-09-26T15:06:29Z\",\n  \"classification\": {\n    \"category\": \"Networking / CoreDNS\",\n    \"severity\": \"HIGH\",\n    \"confidence\": 0.93\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"Cluster DNS resolution failure (NXDOMAIN / 'no such host') when attempting to resolve 'payment-service.default.svc.cluster.local' via kube-dns at 10.96.0.10:53. The target Service does not exist in the 'default' namespace, is deployed under a different namespace, or CoreDNS is unable to resolve the record.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T12:05:01Z\",\n      \"line_number\": 1,\n      \"event\": \"TCP dial error: DNS query to 10.96.0.10:53 for 'payment-service.default.svc.cluster.local' returned 'no such host'.\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T12:05:02Z\",\n      \"line_number\": 2,\n      \"event\": \"Application checkout transaction aborted due to upstream resolution failure.\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T12:05:01Z\",\n      \"snippet\": \"[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\",\n      \"interpretation\": \"DNS resolution query to cluster DNS (10.96.0.10:53) for FQDN payment-service.default.svc.cluster.local failed with NXDOMAIN ('no such host').\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T12:05:02Z\",\n      \"snippet\": \"[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure\",\n      \"interpretation\": \"Application transaction processing aborted due to failure resolving the upstream payment service hostname.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Verify whether the 'payment-service' Service exists in the 'default' namespace using 'kubectl get svc payment-service -n default'.\",\n      \"If 'payment-service' is deployed in another namespace (e.g., 'payments' or 'production'), update application configuration to use the correct FQDN: 'payment-service.<target-namespace>.svc.cluster.local'.\",\n      \"If the Service is missing entirely, deploy or restore the Service manifest pointing to the payment service pods.\",\n      \"Check CoreDNS pod health and logs in 'kube-system' to ensure cluster DNS is functioning properly.\",\n      \"Check if any NetworkPolicies restrict egress from the client pod to CoreDNS (port 53 UDP/TCP).\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl get svc payment-service -n default\",\n      \"kubectl get svc -A | grep payment\",\n      \"kubectl get pods -n kube-system -l k8s-app=kube-dns\",\n      \"kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\",\n      \"kubectl exec -it <client-pod> -- nslookup payment-service.default.svc.cluster.local\"\n    ]\n  }\n}\n```",
+                          "structured_json": {
+                            "incident_id": "k8s-inc-20260926-210629",
+                            "title": "Upstream DNS Resolution Failure for payment-service in default namespace",
+                            "investigation_timestamp": "2026-09-26T15:06:29Z",
+                            "classification": {
+                              "category": "Networking / CoreDNS",
+                              "severity": "HIGH",
+                              "confidence": 0.93
+                            },
+                            "root_cause_analysis": {
+                              "summary": "Cluster DNS resolution failure (NXDOMAIN / 'no such host') when attempting to resolve 'payment-service.default.svc.cluster.local' via kube-dns at 10.96.0.10:53. The target Service does not exist in the 'default' namespace, is deployed under a different namespace, or CoreDNS is unable to resolve the record."
+                            },
+                            "timeline": [
+                              {
+                                "timestamp": "2026-09-26T12:05:01Z",
+                                "line_number": 1,
+                                "event": "TCP dial error: DNS query to 10.96.0.10:53 for 'payment-service.default.svc.cluster.local' returned 'no such host'."
+                              },
+                              {
+                                "timestamp": "2026-09-26T12:05:02Z",
+                                "line_number": 2,
+                                "event": "Application checkout transaction aborted due to upstream resolution failure."
+                              }
+                            ],
+                            "evidence_citations": [
+                              {
+                                "line_number": 1,
+                                "timestamp": "2026-09-26T12:05:01Z",
+                                "snippet": "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host",
+                                "interpretation": "DNS resolution query to cluster DNS (10.96.0.10:53) for FQDN payment-service.default.svc.cluster.local failed with NXDOMAIN ('no such host')."
+                              },
+                              {
+                                "line_number": 2,
+                                "timestamp": "2026-09-26T12:05:02Z",
+                                "snippet": "[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure",
+                                "interpretation": "Application transaction processing aborted due to failure resolving the upstream payment service hostname."
+                              }
+                            ],
+                            "remediation_plan": {
+                              "steps": [
+                                "Verify whether the 'payment-service' Service exists in the 'default' namespace using 'kubectl get svc payment-service -n default'.",
+                                "If 'payment-service' is deployed in another namespace (e.g., 'payments' or 'production'), update application configuration to use the correct FQDN: 'payment-service.<target-namespace>.svc.cluster.local'.",
+                                "If the Service is missing entirely, deploy or restore the Service manifest pointing to the payment service pods.",
+                                "Check CoreDNS pod health and logs in 'kube-system' to ensure cluster DNS is functioning properly.",
+                                "Check if any NetworkPolicies restrict egress from the client pod to CoreDNS (port 53 UDP/TCP)."
+                              ],
+                              "kubectl_commands": [
+                                "kubectl get svc payment-service -n default",
+                                "kubectl get svc -A | grep payment",
+                                "kubectl get pods -n kube-system -l k8s-app=kube-dns",
+                                "kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100",
+                                "kubectl exec -it <client-pod> -- nslookup payment-service.default.svc.cluster.local"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "role": "user"
+                },
+                "event_time": "2026-09-26T15:06:29.164996Z"
+              },
+              {
+                "author": "k8s_investigator",
+                "content": {
+                  "parts": [
+                    {
+                      "text": "# Kubernetes Incident Investigation: Upstream DNS Resolution Failure\n\n**Severity:** `HIGH`  \n**Category:** `Networking / CoreDNS`  \n**Diagnostic Confidence:** `93%`\n\n---\n\n## 1. Executive Summary & Root Cause Analysis\n\n**Root Cause:**  \nCluster DNS lookup failure (`NXDOMAIN` / `no such host`) when attempting to resolve the upstream Kubernetes service `payment-service.default.svc.cluster.local` via the cluster DNS resolver (`10.96.0.10:53`). \n\nThis typically indicates one of the following:\n1. **Missing Service Resource**: The Service `payment-service` does not exist in the `default` namespace.\n2. **Namespace Mismatch**: The service exists in a non-default namespace (e.g., `payments`, `prod`), but the client application queried `payment-service.default.svc.cluster.local` or omitted the namespace qualifier while running in `default`.\n3. **CoreDNS Outage or Degradation**: CoreDNS pods in `kube-system` are crashing, unready, or unable to process queries.\n4. **Network Policy**: An egress policy on the client pod or an ingress policy on CoreDNS is blocking UDP/TCP port 53.\n\nAs a direct consequence, the application failed to establish a TCP connection, leading to a critical transaction abort in the checkout flow.\n\n---\n\n## 2. Chronological Incident Timeline\n\n| Timestamp | Log Line | Event Description |\n| :--- | :---: | :--- |\n| `2026-09-26T12:05:01Z` | Line 1 | **DNS Query Failed**: Container attempted to resolve `payment-service.default.svc.cluster.local` via DNS server `10.96.0.10:53`, receiving `no such host`. |\n| `2026-09-26T12:05:02Z` | Line 2 | **Transaction Failure**: Application halted the checkout transaction due to upstream resolution failure. |\n\n---\n\n## 3. Supporting Evidence Citations\n\n| Line | Timestamp | Raw Log Snippet | Diagnostic Significance |\n| :---: | :--- | :--- | :--- |\n| **1** | `2026-09-26T12:05:01Z` | `[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host` | Pinpoints target FQDN (`payment-service.default.svc.cluster.local`), cluster DNS resolver IP (`10.96.0.10`), port (`53`), and exact resolver response (`no such host`). |\n| **2** | `2026-09-26T12:05:02Z` | `[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure` | Direct downstream business impact confirming broken dependency on the payment service. |\n\n---\n\n## 4. Remediation Plan & Diagnostic Commands\n\n### Step-by-Step Fix Actions:\n1. **Check Service Existence in Target Namespace**:\n   Confirm whether `payment-service` exists in the `default` namespace:\n   ```bash\n   kubectl get svc payment-service -n default\n   ```\n2. **Locate Target Service Across Cluster**:\n   If the service is not in `default`, check if it exists in another namespace:\n   ```bash\n   kubectl get svc -A | grep payment\n   ```\n   *Action:* If it resides in another namespace (e.g., `payments`), update the client application's configuration or environment variable to target `payment-service.payments.svc.cluster.local`.\n\n3. **Verify CoreDNS Health**:\n   Ensure CoreDNS pods are running and inspect their logs for forwarder or synchronization errors:\n   ```bash\n   kubectl get pods -n kube-system -l k8s-app=kube-dns\n   kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\n   ```\n\n4. **Verify Pod DNS In-Cluster**:\n   Execute an inline lookup from the calling pod:\n   ```bash\n   kubectl exec -it <client-pod> -n default -- nslookup payment-service.default.svc.cluster.local\n   kubectl exec -it <client-pod> -n default -- cat /etc/resolv.conf\n   ```\n\n5. **Inspect Network Policies**:\n   Verify whether an egress NetworkPolicy is blocking DNS traffic on port 53:\n   ```bash\n   kubectl get networkpolicies -n default\n   ```\n\n---\n\n## 5. Machine-Readable Investigation Payload (JSON)\n\n```json\n{\n  \"incident_id\": \"k8s-inc-20260926-210629\",\n  \"title\": \"Upstream DNS Resolution Failure for payment-service in default namespace\",\n  \"investigation_timestamp\": \"2026-09-26T15:06:29Z\",\n  \"classification\": {\n    \"category\": \"Networking / CoreDNS\",\n    \"severity\": \"HIGH\",\n    \"confidence\": 0.93\n  },\n  \"root_cause_analysis\": {\n    \"summary\": \"Cluster DNS resolution failure (NXDOMAIN / 'no such host') when attempting to resolve 'payment-service.default.svc.cluster.local' via kube-dns at 10.96.0.10:53. The target Service does not exist in the 'default' namespace, is deployed under a different namespace, or CoreDNS is unable to resolve the record.\"\n  },\n  \"timeline\": [\n    {\n      \"timestamp\": \"2026-09-26T12:05:01Z\",\n      \"line_number\": 1,\n      \"event\": \"TCP dial error: DNS query to 10.96.0.10:53 for 'payment-service.default.svc.cluster.local' returned 'no such host'.\"\n    },\n    {\n      \"timestamp\": \"2026-09-26T12:05:02Z\",\n      \"line_number\": 2,\n      \"event\": \"Application checkout transaction aborted due to upstream resolution failure.\"\n    }\n  ],\n  \"evidence_citations\": [\n    {\n      \"line_number\": 1,\n      \"timestamp\": \"2026-09-26T12:05:01Z\",\n      \"snippet\": \"[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\",\n      \"interpretation\": \"DNS resolution query to cluster DNS (10.96.0.10:53) for FQDN payment-service.default.svc.cluster.local failed with NXDOMAIN ('no such host').\"\n    },\n    {\n      \"line_number\": 2,\n      \"timestamp\": \"2026-09-26T12:05:02Z\",\n      \"snippet\": \"[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure\",\n      \"interpretation\": \"Application transaction processing aborted due to failure resolving the upstream payment service hostname.\"\n    }\n  ],\n  \"remediation_plan\": {\n    \"steps\": [\n      \"Verify whether the 'payment-service' Service exists in the 'default' namespace using 'kubectl get svc payment-service -n default'.\",\n      \"If 'payment-service' is deployed in another namespace (e.g., 'payments' or 'production'), update application configuration to use the correct FQDN: 'payment-service.<target-namespace>.svc.cluster.local'.\",\n      \"If the Service is missing entirely, deploy or restore the Service manifest pointing to the payment service pods.\",\n      \"Check CoreDNS pod health and logs in 'kube-system' to ensure cluster DNS is functioning properly.\",\n      \"Check if any NetworkPolicies restrict egress from the client pod to CoreDNS (port 53 UDP/TCP).\"\n    ],\n    \"kubectl_commands\": [\n      \"kubectl get svc payment-service -n default\",\n      \"kubectl get svc -A | grep payment\",\n      \"kubectl get pods -n kube-system -l k8s-app=kube-dns\",\n      \"kubectl logs -n kube-system -l k8s-app=kube-dns --tail=100\",\n      \"kubectl exec -it <client-pod> -- nslookup payment-service.default.svc.cluster.local\"\n    ]\n  }\n}\n```"
+                    }
+                  ],
+                  "role": "model"
+                },
+                "event_time": "2026-09-26T15:06:29.167289Z"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

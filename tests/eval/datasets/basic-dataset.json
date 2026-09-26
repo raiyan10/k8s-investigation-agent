@@ -1,0 +1,67 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "oomkilled_investigation",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Please investigate the following container logs and provide a detailed root cause analysis with supporting evidence:\n[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\nAuthorization: Bearer secret-token-xyz123"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The container was terminated by the Linux kernel OOM killer (exit code 137) because memory exceeded the 512MiB cgroup limit following a Java heap space exhaustion error. Citations should highlight line numbers, timestamps, and recommend increasing memory limits and tuning JVM heap options."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "liveness_probe_investigation",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Please investigate these pod logs and diagnose the incident with supporting evidence:\n[2026-09-26T11:00:10Z] WARNING: Connection pool exhausted, waiting for active connections...\n[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The container restarted due to Kubelet liveness probe failure after connection pool exhaustion caused the health check endpoint /healthz to time out and return HTTP 500. Evidence includes timestamps of pool exhaustion and probe failure, with remediation targeting pool sizing and probe timeout adjustments."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "coredns_network_investigation",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Investigate the following error log and provide root cause, evidence timeline, and fix commands:\n[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n[2026-09-26T12:05:02Z] CRITICAL: Unable to process checkout transaction due to upstream resolution failure"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The incident was caused by internal DNS resolution failure for payment-service.default.svc.cluster.local. Evidence includes dial tcp lookup error on port 53. Remediation involves checking the payment service definition and inspecting CoreDNS pods."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
