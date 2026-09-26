@@ -523,104 +523,94 @@ def generate_investigation_report(
         },
     }
 
-    # Build Markdown Report
-    lines = [
-        f"# Kubernetes Incident Investigation Report: {incident_title}",
+    # Build Plain Text Report (no markdown formatting, no JSON payload)
+    sep_double = "=" * 80
+    sep_single = "-" * 80
+
+    pt_lines = [
+        sep_double,
+        f"KUBERNETES INCIDENT INVESTIGATION REPORT: {incident_title.upper()}",
+        sep_double,
+        f"Severity:   {severity.upper()}",
+        f"Category:   {category}",
+        f"Confidence: {int(confidence_score * 100)}%",
+        f"Generated:  {timestamp_str}",
         "",
-        f"**Severity:** `{severity.upper()}` | **Category:** `{category}` | **Confidence:** `{int(confidence_score * 100)}%` | **Generated:** `{timestamp_str}`",
+        "1. EXECUTIVE SUMMARY & ROOT CAUSE ANALYSIS",
+        sep_single,
+        root_cause,
         "",
-        "---",
-        "",
-        "## 1. Executive Summary & Root Cause Analysis",
-        "",
-        f"{root_cause}",
-        "",
-        "---",
-        "",
-        "## 2. Chronological Incident Timeline",
-        "",
+        "2. CHRONOLOGICAL INCIDENT TIMELINE",
+        sep_single,
     ]
 
     if timeline:
-        lines.append("| Timestamp | Line | Event Description |")
-        lines.append("| :--- | :--- | :--- |")
         for item in timeline:
             ts = item.get("timestamp", "N/A") or "N/A"
             ln = item.get("line_number", "N/A")
             ev = item.get("event", "")
-            lines.append(f"| `{ts}` | Line {ln} | {ev} |")
+            pt_lines.append(f"  * [{ts}] Line {ln}: {ev}")
     else:
-        lines.append("*No timestamped sequence extracted.*")
+        pt_lines.append("  (No chronological sequence extracted)")
 
-    lines.extend(
+    pt_lines.extend(
         [
             "",
-            "---",
-            "",
-            "## 3. Supporting Evidence & Log Citations",
-            "",
+            "3. SUPPORTING EVIDENCE & LOG CITATIONS",
+            sep_single,
         ]
     )
 
     if evidence:
-        lines.append("| Line | Timestamp | Raw Log Snippet | Significance |")
-        lines.append("| :--- | :--- | :--- | :--- |")
         for ev in evidence:
             ln = ev.get("line_number", "N/A")
             ts = ev.get("timestamp", "N/A") or "N/A"
-            snip = ev.get("snippet", "").replace("\n", " ").replace("|", "\\|")
-            interp = ev.get("interpretation", "").replace("|", "\\|")
-            lines.append(f"| `{ln}` | `{ts}` | `{snip}` | {interp} |")
+            snip = ev.get("snippet", "").strip()
+            interp = ev.get("interpretation", "").strip()
+            pt_lines.append(f"  [Line {ln}] {ts}")
+            pt_lines.append(f"    Log:          {snip}")
+            pt_lines.append(f"    Significance: {interp}")
+            pt_lines.append("")
     else:
-        lines.append("*No direct citations provided.*")
+        pt_lines.append("  (No direct citations provided)")
+        pt_lines.append("")
 
-    lines.extend(
+    pt_lines.extend(
         [
-            "",
-            "---",
-            "",
-            "## 4. Recommended Action Plan & Remediation",
-            "",
+            "4. RECOMMENDED ACTION PLAN & REMEDIATION",
+            sep_single,
         ]
     )
 
     if remediation:
         for idx, step in enumerate(remediation, start=1):
-            lines.append(f"{idx}. {step}")
+            pt_lines.append(f"  {idx}. {step}")
     else:
-        lines.append("Review service and pod configurations.")
+        pt_lines.append("  Review service and pod configurations.")
 
-    lines.extend(
+    pt_lines.extend(
         [
             "",
-            "### Diagnostic & Verification Commands",
-            "```bash",
+            "Diagnostic & Verification Commands:",
         ]
     )
 
     if kubectl_cmds:
         for cmd in kubectl_cmds:
-            lines.append(cmd)
+            pt_lines.append(f"  {cmd}")
     else:
-        lines.append("kubectl get pods -A")
+        pt_lines.append("  kubectl get pods -A")
 
-    lines.extend(
-        [
-            "```",
-            "",
-            "---",
-            "",
-            "## 5. Machine-Readable Investigation Payload (JSON)",
-            "```json",
-            json.dumps(structured_data, indent=2),
-            "```",
-        ]
-    )
+    pt_lines.append("")
+    pt_lines.append(sep_double)
 
-    markdown_report = "\n".join(lines)
+    plain_text_report = "\n".join(pt_lines)
 
     return {
         "status": "success",
-        "markdown_report": markdown_report,
+        "plain_text_report": plain_text_report,
+        "report": plain_text_report,
+        "structured_data": structured_data,
+        "markdown_report": plain_text_report,
         "structured_json": structured_data,
     }

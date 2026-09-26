@@ -1,0 +1,8 @@
+Type     Reason     Age                   From               Message
+----     ------     ---                   ----               -------
+Normal   Scheduled  38m                   default-scheduler  Successfully assigned default/nginx-c8cd4f8f-29tw4 to demo-cluster-geap-control-plane
+Normal   Pulling    35m (x5 over 38m)     kubelet            Pulling image "nginx123"
+Warning  Failed     35m (x5 over 38m)     kubelet            Failed to pull image "nginx123": failed to pull and unpack image "docker.io/library/nginx123:latest": failed to resolve reference "docker.io/library/nginx123:latest": pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+Warning  Failed     35m (x5 over 38m)     kubelet            Error: ErrImagePull
+Normal   BackOff    3m37s (x151 over 38m) kubelet            Back-off pulling image "nginx123"
+Warning  Failed     3m37s (x151 over 38m) kubelet            Error: ImagePullBackOff

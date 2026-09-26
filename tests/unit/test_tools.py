@@ -161,19 +161,20 @@ def test_generate_investigation_report_dual_output():
     )
 
     assert report["status"] == "success"
-    md = report["markdown_report"]
+    pt = report["plain_text_report"]
     structured = report["structured_json"]
 
-    # Verify Markdown components
-    assert "# Kubernetes Incident Investigation Report: OOMKill Incident" in md
-    assert "## 1. Executive Summary & Root Cause Analysis" in md
-    assert "## 2. Chronological Incident Timeline" in md
-    assert "## 3. Supporting Evidence & Log Citations" in md
-    assert "## 4. Recommended Action Plan & Remediation" in md
-    assert "## 5. Machine-Readable Investigation Payload (JSON)" in md
-    assert "kubectl describe pod my-pod -n default" in md
+    # Verify Plain Text components (no markdown, no json code fences)
+    assert "KUBERNETES INCIDENT INVESTIGATION REPORT: OOMKILL INCIDENT" in pt
+    assert "1. EXECUTIVE SUMMARY & ROOT CAUSE ANALYSIS" in pt
+    assert "2. CHRONOLOGICAL INCIDENT TIMELINE" in pt
+    assert "3. SUPPORTING EVIDENCE & LOG CITATIONS" in pt
+    assert "4. RECOMMENDED ACTION PLAN & REMEDIATION" in pt
+    assert "kubectl describe pod my-pod -n default" in pt
+    assert "#" not in pt
+    assert "```" not in pt
 
-    # Verify JSON components
+    # Verify structured data integrity
     assert (
         structured["classification"]["category"]
         == "Resource Limit / Memory (OOMKilled)"

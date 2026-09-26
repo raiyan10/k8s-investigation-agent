@@ -1,0 +1,4 @@
+[2026-09-26T12:00:00Z] INFO Application starting up on port 8080...
+[2026-09-26T12:00:15Z] WARNING High memory allocation detected: 480MB / 512MB
+[2026-09-26T12:00:18Z] ERROR java.lang.OutOfMemoryError: Java heap space
+[2026-09-26T12:00:20Z] CRITICAL Container memory limit exceeded. Process terminated with exit code 137.
