@@ -93,6 +93,7 @@ def parse_and_sanitize_logs(log_content: str) -> dict:
         r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|"
         r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+\d{2}:\d{2}:\d{2})"
     )
+    k8s_age_pattern = re.compile(r"\b(\d+[smhdwy](?:\s*\([^\)]+\))?)\b")
     level_pattern = re.compile(
         r"\b(FATAL|PANIC|CRITICAL|SEVERE|ERROR|ERR|WARN|WARNING|INFO|DEBUG|TRACE)\b",
         re.IGNORECASE,
@@ -100,7 +101,8 @@ def parse_and_sanitize_logs(log_content: str) -> dict:
     anomaly_keywords = re.compile(
         r"(oom|out of memory|cgroup|killed|exit code|crash|backoff|panic|exception|failed|failure|"
         r"timeout|timed out|refused|unreachable|forbidden|unauthorized|denied|broken pipe|"
-        r"connection reset|probe failed|cannot find|no such host|not found)",
+        r"connection reset|probe failed|cannot find|no such host|not found|errimagepull|imagepullbackoff|"
+        r"pull access denied|failed to pull)",
         re.IGNORECASE,
     )
     stack_trace_start = re.compile(
@@ -131,7 +133,12 @@ def parse_and_sanitize_logs(log_content: str) -> dict:
             continue
 
         ts_match = ts_pattern.search(line)
-        timestamp = ts_match.group(1) if ts_match else ""
+        if ts_match:
+            timestamp = ts_match.group(1)
+        else:
+            age_match = k8s_age_pattern.search(line)
+            timestamp = f"Age: {age_match.group(1)}" if age_match else ""
+
         if timestamp:
             timestamps.append(timestamp)
 
@@ -214,6 +221,93 @@ def match_k8s_signatures(log_content: str) -> dict:
 
     # Signature Definitions
     rules = [
+        {
+            "id": "IMAGE_PULL_FAILURE",
+            "category": "Image Deployment / ImagePullBackOff",
+            "severity": "CRITICAL",
+            "regex": re.compile(
+                r"(ErrImagePull|ImagePullBackOff|Failed to pull image|pull access denied|"
+                r"repository does not exist|manifest unknown|Back-off pulling image|"
+                r"failed to resolve reference|insufficient_scope: authorization failed|"
+                r"rpc error: code = Unknown desc = Error response from daemon)",
+                re.IGNORECASE,
+            ),
+            "root_cause": "Kubelet cannot pull the specified container image. The image name or tag does not exist, is misspelled, or requires private registry authentication credentials (imagePullSecrets).",
+            "confidence": 0.99,
+            "kubectl_commands": [
+                "kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Events:'",
+                "kubectl get pod <pod_name> -n <namespace> -o jsonpath='{.spec.containers[*].image}'",
+                "kubectl get secrets -n <namespace>",
+            ],
+            "remediation": [
+                "Verify the container image repository name and tag for spelling mistakes.",
+                "Ensure that the image has been pushed to the container registry and is publicly accessible, or configure an imagePullSecret in the Pod spec.",
+                "Test pulling the image directly on a machine with `docker pull <image>` to confirm availability.",
+            ],
+        },
+        {
+            "id": "CRASH_LOOP_BACKOFF",
+            "category": "Lifecycle / CrashLoopBackOff",
+            "severity": "CRITICAL",
+            "regex": re.compile(
+                r"(CrashLoopBackOff|back-off .* restarting failed container)",
+                re.IGNORECASE,
+            ),
+            "root_cause": "The container process repeatedly crashes immediately after startup, causing kubelet to enter an exponential backoff loop.",
+            "confidence": 0.97,
+            "kubectl_commands": [
+                "kubectl logs <pod_name> -n <namespace> --previous",
+                "kubectl describe pod <pod_name> -n <namespace>",
+            ],
+            "remediation": [
+                "Check the logs of the previously terminated container instance (`kubectl logs <pod_name> --previous`).",
+                "Review the container exit code and termination reason in `kubectl describe pod`.",
+                "Verify required configuration files, environment variables, and startup command flags.",
+            ],
+        },
+        {
+            "id": "SCHEDULING_FAILED_UNSCHEDULABLE",
+            "category": "Cluster Scheduling / Unschedulable",
+            "severity": "HIGH",
+            "regex": re.compile(
+                r"(0/\d+ nodes are available|FailedScheduling|Insufficient cpu|Insufficient memory|"
+                r"node\(s\) had untolerated taint|node\(s\) didn't match PodTopologySpread|"
+                r"didn't match PodAffinity|MatchNodeSelector)",
+                re.IGNORECASE,
+            ),
+            "root_cause": "The Kubernetes scheduler cannot schedule the pod onto any available cluster node due to resource constraints (CPU/memory), node taints, or affinity rules.",
+            "confidence": 0.96,
+            "kubectl_commands": [
+                "kubectl describe pod <pod_name> -n <namespace> | grep -A 8 'Events:'",
+                "kubectl describe nodes | grep -A 6 'Allocated resources:'",
+                "kubectl get nodes",
+            ],
+            "remediation": [
+                "Check whether cluster nodes have sufficient unallocated CPU and memory to satisfy the pod's resource requests.",
+                "Verify if pod affinity, nodeSelector, or node taints require corresponding tolerations.",
+                "Scale cluster nodes or reduce resource requests in the deployment spec.",
+            ],
+        },
+        {
+            "id": "CREATE_CONTAINER_ERROR",
+            "category": "Container Runtime / Initialization",
+            "severity": "HIGH",
+            "regex": re.compile(
+                r"(CreateContainerConfigError|CreateContainerError|failed to generate container spec|"
+                r"cannot find volume|error setting up volume)",
+                re.IGNORECASE,
+            ),
+            "root_cause": "Kubelet failed to initialize the container due to invalid container configuration, missing mounts, or missing referenced resources.",
+            "confidence": 0.95,
+            "kubectl_commands": [
+                "kubectl describe pod <pod_name> -n <namespace> | grep -A 10 'Events:'",
+                "kubectl get configmap,secret,pvc -n <namespace>",
+            ],
+            "remediation": [
+                "Check `kubectl describe pod` events for the exact volume or configuration failure.",
+                "Ensure referenced Secrets, ConfigMaps, or PersistentVolumeClaims exist and are in the Ready state.",
+            ],
+        },
         {
             "id": "OOM_KILLED_137",
             "category": "Resource Limit / Memory (OOMKilled)",
@@ -464,12 +558,12 @@ def generate_investigation_report(
     category: str,
     severity: str,
     confidence_score: float,
-    timeline_json: str,
-    evidence_citations_json: str,
-    remediation_steps_json: str,
-    kubectl_commands_json: str,
+    timeline_json: Any = None,
+    evidence_citations_json: Any = None,
+    remediation_steps_json: Any = None,
+    kubectl_commands_json: Any = None,
 ) -> dict:
-    """Builds the comprehensive dual-format investigation report (Markdown and structured JSON).
+    """Builds the comprehensive plain text investigation report.
 
     Args:
         incident_title: Concise title of the investigated incident.
@@ -477,23 +571,35 @@ def generate_investigation_report(
         category: Kubernetes failure category.
         severity: Severity level (e.g. CRITICAL, HIGH, MEDIUM, LOW).
         confidence_score: Diagnostic confidence between 0.0 and 1.0.
-        timeline_json: JSON string of chronological events: list of dicts with timestamp, line_number, event.
-        evidence_citations_json: JSON string of supporting evidence: list of dicts with line_number, timestamp, snippet, interpretation.
-        remediation_steps_json: JSON string of actionable remediation steps: list of strings.
-        kubectl_commands_json: JSON string of recommended kubectl commands: list of strings.
+        timeline_json: Chronological events: list of dicts with timestamp, line_number, event (or JSON string).
+        evidence_citations_json: Supporting evidence: list of dicts with line_number, timestamp, snippet, interpretation (or JSON string).
+        remediation_steps_json: Actionable remediation steps: list of strings (or JSON string).
+        kubectl_commands_json: Recommended kubectl commands: list of strings (or JSON string).
 
     Returns:
-        A dictionary containing both the human-readable Markdown report and the machine-readable structured JSON.
+        A dictionary containing the clean plain text report and structured incident details.
     """
 
-    # Safely parse JSON inputs
-    def _safe_load(data: str, default: Any) -> Any:
-        try:
-            if isinstance(data, (list, dict)):
-                return data
-            return json.loads(data)
-        except Exception:
+    # Safely parse JSON or Python structures
+    def _safe_load(data: Any, default: Any) -> Any:
+        if data is None:
             return default
+        if isinstance(data, (list, dict)):
+            return data
+        if isinstance(data, str):
+            clean = data.strip()
+            if not clean:
+                return default
+            try:
+                return json.loads(clean)
+            except Exception:
+                lines = [
+                    line.strip().lstrip("-*1234567890. ")
+                    for line in clean.splitlines()
+                    if line.strip()
+                ]
+                return lines if lines else [clean]
+        return default
 
     timeline = _safe_load(timeline_json, [])
     evidence = _safe_load(evidence_citations_json, [])
