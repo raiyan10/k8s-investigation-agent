@@ -15,9 +15,14 @@
 """Unit tests for Kubernetes log investigation tools."""
 
 import json
+import subprocess
+from unittest.mock import MagicMock, patch
 
 from app.tools import (
     generate_investigation_report,
+    get_deployment_history,
+    get_pod_events,
+    get_pod_logs,
     match_k8s_signatures,
     parse_and_sanitize_logs,
 )
@@ -183,3 +188,340 @@ def test_generate_investigation_report_dual_output():
     assert len(structured["timeline"]) == 2
     assert len(structured["evidence_citations"]) == 2
     assert len(structured["remediation_plan"]["kubectl_commands"]) == 2
+
+
+def test_get_pod_logs_success():
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stdout = (
+        "[2026-10-02T10:00:00Z] Starting service...\n"
+        "[2026-10-02T10:00:05Z] Ready to accept connections.\n"
+    )
+
+    with patch("subprocess.run", return_value=mock_res) as mock_run:
+        result = get_pod_logs("test-pod", namespace="prod")
+
+        mock_run.assert_called_once_with(
+            ["kubectl", "logs", "test-pod", "-n", "prod"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result["status"] == "success"
+        assert result["pod_name"] == "test-pod"
+        assert result["namespace"] == "prod"
+        assert result["total_lines"] == 2
+        assert "Ready to accept connections" in result["logs"]
+
+
+def test_get_pod_logs_with_options():
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stdout = "container log line"
+
+    with patch("subprocess.run", return_value=mock_res) as mock_run:
+        result = get_pod_logs(
+            "test-pod",
+            namespace="kube-system",
+            container="app-container",
+            tail_lines=100,
+            previous=True,
+            timestamps=True,
+        )
+
+        mock_run.assert_called_once_with(
+            [
+                "kubectl",
+                "logs",
+                "test-pod",
+                "-n",
+                "kube-system",
+                "-c",
+                "app-container",
+                "--tail",
+                "100",
+                "--previous",
+                "--timestamps",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result["status"] == "success"
+        assert result["container"] == "app-container"
+
+
+def test_get_pod_logs_error_exit_code():
+    mock_res = MagicMock()
+    mock_res.returncode = 1
+    mock_res.stderr = 'Error from server (NotFound): pods "test-pod" not found'
+    mock_res.stdout = ""
+
+    with patch("subprocess.run", return_value=mock_res):
+        result = get_pod_logs("test-pod", namespace="default")
+
+        assert result["status"] == "error"
+        assert result["pod_name"] == "test-pod"
+        assert result["total_lines"] == 0
+        assert result["logs"] == ""
+        assert 'pods "test-pod" not found' in result["message"]
+
+
+def test_get_pod_logs_file_not_found():
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        result = get_pod_logs("test-pod")
+
+        assert result["status"] == "error"
+        assert "kubectl executable not found" in result["message"]
+
+
+def test_get_pod_logs_timeout():
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+    ):
+        result = get_pod_logs("test-pod")
+
+        assert result["status"] == "error"
+        assert "Timed out" in result["message"]
+
+
+def test_get_pod_logs_empty_pod_name():
+    result = get_pod_logs("   ")
+    assert result["status"] == "error"
+    assert "pod_name must not be empty" in result["message"]
+
+
+def test_get_pod_events_success():
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stdout = (
+        "LAST SEEN   TYPE      REASON      OBJECT     MESSAGE\n"
+        "12m         Normal    Scheduled   pod/foo    Successfully assigned default/foo\n"
+        "11m         Warning   FailedSync  pod/foo    Error syncing pod\n"
+    )
+
+    with patch("subprocess.run", return_value=mock_res) as mock_run:
+        result = get_pod_events("foo", namespace="default")
+
+        mock_run.assert_called_once_with(
+            [
+                "kubectl",
+                "get",
+                "events",
+                "-n",
+                "default",
+                "--field-selector",
+                "involvedObject.name=foo",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result["status"] == "success"
+        assert result["pod_name"] == "foo"
+        assert result["namespace"] == "default"
+        assert result["total_events"] == 2
+        assert "Successfully assigned" in result["events"]
+
+
+def test_get_pod_events_no_resources():
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stdout = "No resources found in default namespace.\n"
+
+    with patch("subprocess.run", return_value=mock_res):
+        result = get_pod_events("bar", namespace="default")
+
+        assert result["status"] == "success"
+        assert result["total_events"] == 0
+        assert "No resources found" in result["events"]
+
+
+def test_get_pod_events_error_exit_code():
+    mock_res = MagicMock()
+    mock_res.returncode = 1
+    mock_res.stderr = "Error from server (Forbidden): events is forbidden"
+    mock_res.stdout = ""
+
+    with patch("subprocess.run", return_value=mock_res):
+        result = get_pod_events("bar", namespace="kube-system")
+
+        assert result["status"] == "error"
+        assert result["pod_name"] == "bar"
+        assert result["total_events"] == 0
+        assert result["events"] == ""
+        assert "events is forbidden" in result["message"]
+
+
+def test_get_pod_events_file_not_found():
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        result = get_pod_events("bar")
+
+        assert result["status"] == "error"
+        assert "kubectl executable not found" in result["message"]
+
+
+def test_get_pod_events_timeout():
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+    ):
+        result = get_pod_events("bar")
+
+        assert result["status"] == "error"
+        assert "Timed out" in result["message"]
+
+
+def test_get_pod_events_empty_pod_name():
+    result = get_pod_events("   ")
+    assert result["status"] == "error"
+    assert "pod_name must not be empty" in result["message"]
+
+
+def test_get_deployment_history_success_with_revisions():
+    history_res = MagicMock()
+    history_res.returncode = 0
+    history_res.stdout = (
+        "deployment.apps/nginx\n"
+        "REVISION  CHANGE-CAUSE\n"
+        "1         <none>\n"
+        "2         kubectl set image deployment/nginx nginx=nginx123\n"
+    )
+
+    rev2_res = MagicMock()
+    rev2_res.returncode = 0
+    rev2_res.stdout = (
+        "deployment.apps/nginx with revision #2\n"
+        "Pod Template:\n"
+        "  Labels:  app=nginx\n"
+        "  Containers:\n"
+        "   nginx:\n"
+        "    Image:  nginx123\n"
+    )
+
+    rev1_res = MagicMock()
+    rev1_res.returncode = 0
+    rev1_res.stdout = (
+        "deployment.apps/nginx with revision #1\n"
+        "Pod Template:\n"
+        "  Labels:  app=nginx\n"
+        "  Containers:\n"
+        "   nginx:\n"
+        "    Image:  nginx:1.20\n"
+    )
+
+    def side_effect(cmd, *args, **kwargs):
+        if "--revision=2" in cmd:
+            return rev2_res
+        if "--revision=1" in cmd:
+            return rev1_res
+        return history_res
+
+    with patch("subprocess.run", side_effect=side_effect):
+        result = get_deployment_history("nginx", namespace="default")
+
+        assert result["status"] == "success"
+        assert result["deployment_name"] == "nginx"
+        assert result["revisions"] == [1, 2]
+        assert result["latest_revision"] == 2
+        assert result["latest_images"] == {"nginx": "nginx123"}
+        assert any(
+            "updated image from 'nginx:1.20'" in change
+            for change in result["recent_changes"]
+        )
+
+
+def test_get_deployment_history_resolved_from_pod_name():
+    history_res = MagicMock()
+    history_res.returncode = 0
+    history_res.stdout = (
+        "deployment.apps/nginx\nREVISION  CHANGE-CAUSE\n1         initial release\n"
+    )
+
+    rev1_res = MagicMock()
+    rev1_res.returncode = 0
+    rev1_res.stdout = (
+        "deployment.apps/nginx with revision #1\n"
+        "Pod Template:\n"
+        "  Containers:\n"
+        "   nginx:\n"
+        "    Image:  nginx:1.20\n"
+    )
+
+    def side_effect(cmd, *args, **kwargs):
+        if "--revision=1" in cmd:
+            return rev1_res
+        return history_res
+
+    with patch("subprocess.run", side_effect=side_effect):
+        result = get_deployment_history(
+            pod_name="nginx-c8cd4f8f-29tw4", namespace="prod"
+        )
+
+        assert result["status"] == "success"
+        assert result["deployment_name"] == "nginx"
+        assert result["namespace"] == "prod"
+        assert result["latest_revision"] == 1
+
+
+def test_get_deployment_history_specific_revision():
+    rev1_res = MagicMock()
+    rev1_res.returncode = 0
+    rev1_res.stdout = (
+        "deployment.apps/nginx with revision #1\n"
+        "Pod Template:\n"
+        "  Containers:\n"
+        "   nginx:\n"
+        "    Image:  nginx:1.20\n"
+    )
+
+    with patch("subprocess.run", return_value=rev1_res):
+        result = get_deployment_history(deployment_name="nginx", revision=1)
+
+        assert result["status"] == "success"
+        assert result["revision"] == 1
+        assert result["images"] == {"nginx": "nginx:1.20"}
+
+
+def test_get_deployment_history_missing_identifier():
+    result = get_deployment_history()
+    assert result["status"] == "error"
+    assert "Either deployment_name or pod_name must be provided" in result["message"]
+
+
+def test_get_deployment_history_error_exit_code():
+    err_res = MagicMock()
+    err_res.returncode = 1
+    err_res.stderr = (
+        'Error from server (NotFound): deployments.apps "unknown" not found'
+    )
+    err_res.stdout = ""
+
+    with patch("subprocess.run", return_value=err_res):
+        result = get_deployment_history(deployment_name="unknown")
+
+        assert result["status"] == "error"
+        assert 'deployments.apps "unknown" not found' in result["message"]
+
+
+def test_get_deployment_history_file_not_found():
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        result = get_deployment_history("nginx")
+
+        assert result["status"] == "error"
+        assert "kubectl executable not found" in result["message"]
+
+
+def test_get_deployment_history_timeout():
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+    ):
+        result = get_deployment_history("nginx")
+
+        assert result["status"] == "error"
+        assert "Timed out" in result["message"]

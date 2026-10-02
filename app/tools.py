@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 from typing import Any
 
 
@@ -51,11 +52,515 @@ def _mask_sensitive_data(text: str) -> str:
     return text
 
 
+def get_pod_logs(
+    pod_name: str,
+    namespace: str = "default",
+    container: str | None = None,
+    tail_lines: int | None = None,
+    previous: bool = False,
+    timestamps: bool = False,
+) -> dict:
+    """Fetches the logs of a specific Kubernetes pod using kubectl.
+
+    Args:
+        pod_name: The name of the Kubernetes pod whose logs to fetch.
+        namespace: The Kubernetes namespace where the pod is running. Defaults to 'default'.
+        container: The specific container name within a multi-container pod.
+        tail_lines: Optional number of most recent lines from the logs to retrieve.
+        previous: If True, fetch logs for previously terminated container instances.
+        timestamps: If True, include RFC3339 timestamps in the log output.
+
+    Returns:
+        A dictionary containing the status ('success' or 'error'), pod_name, namespace,
+        total_lines, and the log contents under 'logs'.
+    """
+    if not pod_name or not pod_name.strip():
+        return {
+            "status": "error",
+            "pod_name": pod_name,
+            "namespace": namespace,
+            "container": container,
+            "total_lines": 0,
+            "logs": "",
+            "message": "pod_name must not be empty.",
+            "error": "Invalid pod_name",
+        }
+
+    clean_pod_name = pod_name.strip()
+    clean_namespace = namespace.strip() if namespace else "default"
+    cmd = ["kubectl", "logs", clean_pod_name, "-n", clean_namespace]
+
+    if container and container.strip():
+        cmd.extend(["-c", container.strip()])
+    if tail_lines is not None and tail_lines > 0:
+        cmd.extend(["--tail", str(tail_lines)])
+    if previous:
+        cmd.append("--previous")
+    if timestamps:
+        cmd.append("--timestamps")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            err_msg = (result.stderr or result.stdout or "Unknown error").strip()
+            return {
+                "status": "error",
+                "pod_name": clean_pod_name,
+                "namespace": clean_namespace,
+                "container": container,
+                "total_lines": 0,
+                "logs": "",
+                "message": f"Failed to fetch logs for pod '{clean_pod_name}' in namespace '{clean_namespace}': {err_msg}",
+                "error": err_msg,
+            }
+
+        stdout_text = result.stdout
+        lines = stdout_text.splitlines()
+        return {
+            "status": "success",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "container": container,
+            "total_lines": len(lines),
+            "logs": stdout_text,
+        }
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "container": container,
+            "total_lines": 0,
+            "logs": "",
+            "message": "kubectl executable not found. Ensure kubectl is installed and in PATH.",
+            "error": "kubectl not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "container": container,
+            "total_lines": 0,
+            "logs": "",
+            "message": f"Timed out while fetching logs for pod '{clean_pod_name}' in namespace '{clean_namespace}'.",
+            "error": "TimeoutExpired",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "container": container,
+            "total_lines": 0,
+            "logs": "",
+            "message": f"Unexpected error while fetching logs for pod '{clean_pod_name}': {e}",
+            "error": str(e),
+        }
+
+
+def get_pod_events(
+    pod_name: str,
+    namespace: str = "default",
+) -> dict:
+    """Fetches the Kubernetes events for a specific pod using kubectl.
+
+    Args:
+        pod_name: The name of the Kubernetes pod whose events to fetch.
+        namespace: The Kubernetes namespace where the pod is running. Defaults to 'default'.
+
+    Returns:
+        A dictionary containing the status ('success' or 'error'), pod_name, namespace,
+        total_events, and the events output text under 'events'.
+    """
+    if not pod_name or not pod_name.strip():
+        return {
+            "status": "error",
+            "pod_name": pod_name,
+            "namespace": namespace,
+            "total_events": 0,
+            "events": "",
+            "message": "pod_name must not be empty.",
+            "error": "Invalid pod_name",
+        }
+
+    clean_pod_name = pod_name.strip()
+    clean_namespace = namespace.strip() if namespace else "default"
+    cmd = [
+        "kubectl",
+        "get",
+        "events",
+        "-n",
+        clean_namespace,
+        "--field-selector",
+        f"involvedObject.name={clean_pod_name}",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            err_msg = (result.stderr or result.stdout or "Unknown error").strip()
+            return {
+                "status": "error",
+                "pod_name": clean_pod_name,
+                "namespace": clean_namespace,
+                "total_events": 0,
+                "events": "",
+                "message": f"Failed to fetch events for pod '{clean_pod_name}' in namespace '{clean_namespace}': {err_msg}",
+                "error": err_msg,
+            }
+
+        stdout_text = result.stdout
+        lines = [line for line in stdout_text.splitlines() if line.strip()]
+
+        if not lines or "No resources found" in stdout_text:
+            total_events = 0
+        elif len(lines) > 1 and ("LAST SEEN" in lines[0] or "TYPE" in lines[0].upper()):
+            total_events = len(lines) - 1
+        else:
+            total_events = len(lines)
+
+        return {
+            "status": "success",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "total_events": total_events,
+            "events": stdout_text,
+        }
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "total_events": 0,
+            "events": "",
+            "message": "kubectl executable not found. Ensure kubectl is installed and in PATH.",
+            "error": "kubectl not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "total_events": 0,
+            "events": "",
+            "message": f"Timed out while fetching events for pod '{clean_pod_name}' in namespace '{clean_namespace}'.",
+            "error": "TimeoutExpired",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "pod_name": clean_pod_name,
+            "namespace": clean_namespace,
+            "total_events": 0,
+            "events": "",
+            "message": f"Unexpected error while fetching events for pod '{clean_pod_name}': {e}",
+            "error": str(e),
+        }
+
+
+def _extract_containers_and_images(revision_text: str) -> dict[str, str]:
+    """Extracts container names and image references from kubectl rollout revision text."""
+    containers: dict[str, str] = {}
+    current_container = None
+    for line in revision_text.splitlines():
+        line_stripped = line.strip()
+        m_cont = re.match(r"^([a-zA-Z0-9_\-]+):$", line_stripped)
+        if m_cont and line_stripped not in (
+            "Pod Template:",
+            "Labels:",
+            "Volumes:",
+            "Environment:",
+            "Mounts:",
+            "Annotations:",
+        ):
+            current_container = m_cont.group(1)
+        m_img = re.match(r"^Image:\s+(\S+)", line_stripped)
+        if m_img:
+            c_name = current_container or f"container_{len(containers) + 1}"
+            containers[c_name] = m_img.group(1)
+    return containers
+
+
+def _extract_revisions_from_history(history_text: str) -> list[int]:
+    """Parses revision numbers from kubectl rollout history table."""
+    revisions: list[int] = []
+    for line in history_text.splitlines():
+        line_stripped = line.strip()
+        m = re.match(r"^(\d+)\s+", line_stripped)
+        if m:
+            try:
+                revisions.append(int(m.group(1)))
+            except ValueError:
+                pass
+    return sorted(revisions)
+
+
+def get_deployment_history(
+    deployment_name: str | None = None,
+    pod_name: str | None = None,
+    namespace: str = "default",
+    revision: int | None = None,
+) -> dict:
+    """Fetches the rollout and revision history for a Kubernetes deployment to analyze recent version changes.
+
+    Args:
+        deployment_name: The name of the Kubernetes deployment. If omitted, resolved from pod_name.
+        pod_name: Optional name of a pod in the deployment used to infer deployment_name.
+        namespace: The Kubernetes namespace where the deployment is located. Defaults to 'default'.
+        revision: Optional specific revision number to inspect detailed pod template and container images.
+
+    Returns:
+        A dictionary containing the status ('success' or 'error'), deployment_name, namespace,
+        rollout history, detected revisions, container images, and recent version changes.
+    """
+    if not deployment_name and not pod_name:
+        return {
+            "status": "error",
+            "deployment_name": "",
+            "namespace": namespace,
+            "message": "Either deployment_name or pod_name must be provided.",
+            "error": "Missing deployment identifier",
+        }
+
+    clean_namespace = namespace.strip() if namespace else "default"
+
+    target_deployment = None
+    if deployment_name and deployment_name.strip():
+        raw_name = deployment_name.strip()
+        pod_match = re.match(r"^(.+)-[a-f0-9]{8,10}-[a-z0-9]{5}$", raw_name)
+        target_deployment = pod_match.group(1) if pod_match else raw_name
+    elif pod_name and pod_name.strip():
+        raw_pod = pod_name.strip()
+        pod_match = re.match(r"^(.+)-[a-f0-9]{8,10}-[a-z0-9]{5}$", raw_pod)
+        target_deployment = pod_match.group(1) if pod_match else raw_pod
+
+    if not target_deployment:
+        return {
+            "status": "error",
+            "deployment_name": "",
+            "namespace": clean_namespace,
+            "message": "Could not determine deployment name from provided parameters.",
+            "error": "Invalid deployment identifier",
+        }
+
+    # If specific revision was requested
+    if revision is not None:
+        cmd = [
+            "kubectl",
+            "rollout",
+            "history",
+            f"deployment/{target_deployment}",
+            "-n",
+            clean_namespace,
+            f"--revision={revision}",
+        ]
+        try:
+            res = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, check=False
+            )
+            if res.returncode != 0:
+                err_msg = (res.stderr or res.stdout or "Unknown error").strip()
+                return {
+                    "status": "error",
+                    "deployment_name": target_deployment,
+                    "namespace": clean_namespace,
+                    "revision": revision,
+                    "message": f"Failed to fetch revision {revision} for deployment '{target_deployment}' in namespace '{clean_namespace}': {err_msg}",
+                    "error": err_msg,
+                }
+            images = _extract_containers_and_images(res.stdout)
+            return {
+                "status": "success",
+                "deployment_name": target_deployment,
+                "namespace": clean_namespace,
+                "revision": revision,
+                "details": res.stdout,
+                "images": images,
+            }
+        except FileNotFoundError:
+            return {
+                "status": "error",
+                "deployment_name": target_deployment,
+                "namespace": clean_namespace,
+                "message": "kubectl executable not found. Ensure kubectl is installed and in PATH.",
+                "error": "kubectl not found",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "error",
+                "deployment_name": target_deployment,
+                "namespace": clean_namespace,
+                "message": f"Timed out fetching revision {revision} for deployment '{target_deployment}'.",
+                "error": "TimeoutExpired",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "deployment_name": target_deployment,
+                "namespace": clean_namespace,
+                "message": f"Unexpected error fetching revision {revision} for deployment '{target_deployment}': {e}",
+                "error": str(e),
+            }
+
+    # Fetch rollout history table
+    cmd = [
+        "kubectl",
+        "rollout",
+        "history",
+        f"deployment/{target_deployment}",
+        "-n",
+        clean_namespace,
+    ]
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, check=False
+        )
+        if res.returncode != 0:
+            err_msg = (res.stderr or res.stdout or "Unknown error").strip()
+            return {
+                "status": "error",
+                "deployment_name": target_deployment,
+                "namespace": clean_namespace,
+                "message": f"Failed to fetch rollout history for deployment '{target_deployment}' in namespace '{clean_namespace}': {err_msg}",
+                "error": err_msg,
+            }
+
+        history_text = res.stdout
+        revisions = _extract_revisions_from_history(history_text)
+        recent_changes: list[str] = []
+        latest_images: dict[str, str] = {}
+        prev_images: dict[str, str] = {}
+        latest_rev = revisions[-1] if revisions else None
+
+        # Inspect latest revision if available
+        if latest_rev is not None:
+            cmd_latest = [
+                "kubectl",
+                "rollout",
+                "history",
+                f"deployment/{target_deployment}",
+                "-n",
+                clean_namespace,
+                f"--revision={latest_rev}",
+            ]
+            res_latest = subprocess.run(
+                cmd_latest,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if res_latest.returncode == 0:
+                latest_images = _extract_containers_and_images(res_latest.stdout)
+
+        # Inspect previous revision if available to compare versions
+        if len(revisions) >= 2:
+            prev_rev = revisions[-2]
+            cmd_prev = [
+                "kubectl",
+                "rollout",
+                "history",
+                f"deployment/{target_deployment}",
+                "-n",
+                clean_namespace,
+                f"--revision={prev_rev}",
+            ]
+            res_prev = subprocess.run(
+                cmd_prev,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if res_prev.returncode == 0:
+                prev_images = _extract_containers_and_images(res_prev.stdout)
+
+            # Compare container images between prev and latest
+            all_containers = set(latest_images.keys()) | set(prev_images.keys())
+            for c in sorted(all_containers):
+                old_img = prev_images.get(c)
+                new_img = latest_images.get(c)
+                if old_img != new_img:
+                    if old_img and new_img:
+                        recent_changes.append(
+                            f"Container '{c}': updated image from '{old_img}' (rev {prev_rev}) to '{new_img}' (rev {latest_rev})"
+                        )
+                    elif new_img:
+                        recent_changes.append(
+                            f"Container '{c}': added with image '{new_img}' in revision {latest_rev}"
+                        )
+                    else:
+                        recent_changes.append(
+                            f"Container '{c}': removed in revision {latest_rev} (was '{old_img}')"
+                        )
+            if not recent_changes:
+                recent_changes.append(
+                    f"No container image differences detected between revision {prev_rev} and revision {latest_rev}."
+                )
+        elif latest_rev is not None:
+            img_desc = (
+                ", ".join(f"{k}: {v}" for k, v in latest_images.items())
+                if latest_images
+                else "none detected"
+            )
+            recent_changes.append(
+                f"Initial release (revision {latest_rev}) with containers: {img_desc}"
+            )
+
+        return {
+            "status": "success",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "revisions": revisions,
+            "latest_revision": latest_rev,
+            "history": history_text,
+            "latest_images": latest_images,
+            "recent_changes": recent_changes,
+        }
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "message": "kubectl executable not found. Ensure kubectl is installed and in PATH.",
+            "error": "kubectl not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "message": f"Timed out while fetching deployment rollout history for '{target_deployment}'.",
+            "error": "TimeoutExpired",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "message": f"Unexpected error while fetching deployment rollout history for '{target_deployment}': {e}",
+            "error": str(e),
+        }
+
+
 def parse_and_sanitize_logs(log_content: str) -> dict:
     """Parses raw Kubernetes logs, masks sensitive secrets, and extracts anomalous lines.
 
     Args:
-        log_content: The raw text of the logs or an existing file path containing logs.
+        log_content: The raw text of the logs or events (e.g. obtained from get_pod_logs or get_pod_events).
 
     Returns:
         A dictionary containing parsed log statistics, time range, and anomalous log lines

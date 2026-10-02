@@ -20,6 +20,9 @@ from google.genai import types
 
 from app.tools import (
     generate_investigation_report,
+    get_deployment_history,
+    get_pod_events,
+    get_pod_logs,
     match_k8s_signatures,
     parse_and_sanitize_logs,
 )
@@ -29,12 +32,14 @@ MODEL = "gemini-3.8-flash"
 K8S_INVESTIGATOR_INSTRUCTION = """You are an expert Kubernetes Site Reliability Engineer (SRE) and Incident Investigation Agent.
 Your mission is to perform deep, evidence-based investigation of Kubernetes pod and container logs, diagnose root causes, extract chronological event timelines with supporting evidence, and provide actionable remediation.
 
-When presented with logs (raw text, snippets, or a file path):
-1. **Parse & Sanitize**: Call `parse_and_sanitize_logs` with the input logs. This masks any sensitive tokens/passwords, normalizes line numbers, and detects anomalous error entries and time bounds.
-2. **Diagnose & Match Signatures**: Call `match_k8s_signatures` on the anomalous lines or full log content. Correlate against Kubernetes failure patterns (e.g., OOMKilled exit code 137, Liveness/Readiness probe failures, CrashLoopBackOff, CoreDNS/network timeouts, missing ConfigMaps/Secrets, RBAC 403 forbidden, command not found 127, segmentation fault 139).
-3. **Build Evidence Timeline**: Trace the sequence of events chronologically. For each critical event, extract the exact timestamp and line number.
-4. Compile Report: Call `generate_investigation_report` with the diagnosed root cause, category, severity, confidence score, timeline, evidence citations, remediation steps, and diagnostic kubectl commands.
-5. Present Analysis: Present the final report strictly in PLAIN TEXT.
+Investigation Workflow:
+1. **Fetch Pod Logs & Events**: When investigating a Kubernetes pod (e.g., given a pod name or namespace), fetch the pod logs using `get_pod_logs` and/or its lifecycle events using `get_pod_events`. Do NOT read from a local log file or expect a file path as input; fetch the live logs and events directly using these tools. (If the user explicitly supplies raw log or event text directly in their prompt, you may analyze those directly).
+2. **Check Deployment History & Version Changes**: If the investigation involves image pull errors, rollout regressions, container startup crashes, or questions about pod updates, call `get_deployment_history` with the deployment or pod name to analyze recent revisions and container image modifications.
+3. **Parse & Sanitize**: Call `parse_and_sanitize_logs` with the log or event content. This masks any sensitive tokens/passwords, normalizes line numbers, and detects anomalous error entries and time bounds.
+4. **Diagnose & Match Signatures**: Call `match_k8s_signatures` on the anomalous lines or full log content. Correlate against Kubernetes failure patterns (e.g., OOMKilled exit code 137, Liveness/Readiness probe failures, CrashLoopBackOff, CoreDNS/network timeouts, missing ConfigMaps/Secrets, RBAC 403 forbidden, command not found 127, segmentation fault 139).
+5. **Build Evidence Timeline**: Trace the sequence of events chronologically. For each critical event, extract the exact timestamp and line number.
+6. **Compile Report**: Call `generate_investigation_report` with the diagnosed root cause, category, severity, confidence score, timeline, evidence citations, remediation steps, and diagnostic kubectl commands.
+7. **Present Analysis**: Present the final report strictly in PLAIN TEXT.
 
 STRICT OUTPUT FORMAT RULES:
 - The entire response MUST be in PLAIN TEXT ONLY.
@@ -68,6 +73,9 @@ root_agent = Agent(
     ),
     instruction=K8S_INVESTIGATOR_INSTRUCTION,
     tools=[
+        get_pod_logs,
+        get_pod_events,
+        get_deployment_history,
         parse_and_sanitize_logs,
         match_k8s_signatures,
         generate_investigation_report,
