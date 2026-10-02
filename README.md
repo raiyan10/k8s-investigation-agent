@@ -2,7 +2,7 @@
 
 A specialized Site Reliability Engineering (SRE) investigation agent built on the **Gemini Enterprise Agent Platform** using the **Google Agent Development Kit (ADK)** and `agents-cli`.
 
-The agent ingests raw container or pod logs (or files), extracts failure signatures (e.g. `OOMKilled` exit code 137, probe failures, DNS/networking errors, CrashLoopBackOff, RBAC denials), traces a chronological event timeline, redacts sensitive credentials, and produces a comprehensive incident analysis with supporting evidence and actionable `kubectl` remediation commands.
+The agent investigates Kubernetes incidents either by querying a live cluster via `kubectl` or by ingesting raw pod/container log text and files. It detects failure signatures (e.g. `OOMKilled` exit code 137, `ImagePullBackOff` / `ErrImagePull`, probe failures, CoreDNS/networking errors, `CrashLoopBackOff`, RBAC denials), traces chronological event timelines, redacts sensitive credentials, and produces a comprehensive incident analysis with supporting evidence and actionable `kubectl` remediation commands.
 
 ## Architecture
 
@@ -10,9 +10,12 @@ The agent ingests raw container or pod logs (or files), extracts failure signatu
 - **Model**: `gemini-3.8-flash`
 - **Agent Entrypoint**: [`app/agent.py`](file:///home/raiyan10/k8s-investigation-agent/app/agent.py) (`k8s_investigator`)
 - **Investigation Tools**: [`app/tools.py`](file:///home/raiyan10/k8s-investigation-agent/app/tools.py)
+  - `get_pod_logs`: Fetches container and pod logs via `kubectl` (supports specific containers, `--tail`, `--previous` for crashed containers, and timestamps).
+  - `get_pod_events`: Retrieves Kubernetes lifecycle, warning, and failure events for a pod using `kubectl get events`.
+  - `get_deployment_history`: Inspects deployment rollout history and revisions to identify recent container image changes and regressions.
   - `parse_and_sanitize_logs`: Normalizes logs, extracts line numbers (1-indexed), isolates anomalies and stack traces, and redacts sensitive credentials (bearer tokens, passwords, keys).
-  - `match_k8s_signatures`: Diagnoses failures against Kubernetes SRE catalog (OOMKilled, Liveness/Readiness probes, CoreDNS NXDOMAIN, RBAC 403, missing ConfigMaps/Secrets).
-  - `generate_investigation_report`: Compiles dual output: human-readable Markdown with RCA, timeline, evidence table, and kubectl commands + structured JSON payload.
+  - `match_k8s_signatures`: Diagnoses failures against Kubernetes SRE catalog (OOMKilled, ImagePullBackOff, CrashLoopBackOff, Liveness/Readiness probes, CoreDNS NXDOMAIN, RBAC 403, missing ConfigMaps/Secrets).
+  - `generate_investigation_report`: Compiles an evidence-backed incident investigation report in clean plain text (with ASCII dividers and uppercase headers, formatted for CLI/terminal workflows).
 
 ## Project Structure
 
@@ -40,6 +43,7 @@ Before you begin, ensure you have:
 - **uv**: Python package manager (used for all dependency management in this project) - [Install](https://docs.astral.sh/uv/getting-started/installation/) ([add packages](https://docs.astral.sh/uv/concepts/dependencies/) with `uv add <package>`)
 - **agents-cli**: Agents CLI - Install with `uv tool install google-agents-cli`
 - **Google Cloud SDK**: For GCP services - [Install](https://cloud.google.com/sdk/docs/install)
+- **kubectl**: Kubernetes CLI (required for live cluster queries, fetching pod logs, events, and deployment rollouts) - [Install](https://kubernetes.io/docs/tasks/tools/)
 
 
 ## Quick Start
@@ -72,7 +76,8 @@ You can also use features from the [ADK](https://adk.dev/) CLI with `uv run adk`
 | `agents-cli playground` | Launch local development environment                                                  |
 | `agents-cli lint`    | Run code quality checks                                                               |
 | `agents-cli eval`    | Evaluate agent behavior (generate, grade, analyze, and more — see `agents-cli eval --help`) |
-| `uv run pytest tests/unit tests/integration` | Run unit and integration tests                                                        || [A2A Inspector](https://github.com/a2aproject/a2a-inspector) | Launch A2A Protocol Inspector                                                        |
+| `uv run pytest tests/unit tests/integration` | Run unit and integration tests                                                              |
+| [A2A Inspector](https://github.com/a2aproject/a2a-inspector) | Launch A2A Protocol Inspector                                                               |
 
 ## 🛠️ Project Management
 
