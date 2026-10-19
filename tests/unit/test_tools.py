@@ -525,3 +525,16 @@ def test_get_deployment_history_timeout():
 
         assert result["status"] == "error"
         assert "Timed out" in result["message"]
+
+
+def test_root_agent_tools_include_diagnostic_tools():
+    from app.agent import root_agent
+
+    assert get_pod_logs in root_agent.tools
+    assert get_pod_events in root_agent.tools
+    assert get_deployment_history in root_agent.tools
+    assert isinstance(root_agent.instruction, str)
+    assert "get_pod_logs" in root_agent.instruction
+    assert "get_pod_events" in root_agent.instruction
+    assert "get_deployment_history" in root_agent.instruction
+    assert "Do NOT read from a local log file" in root_agent.instruction
