@@ -591,3 +591,37 @@ def test_root_agent_tools_include_diagnostic_tools():
     assert "get_nodes_info" in root_agent.instruction
     assert "get_deployment_history" in root_agent.instruction
     assert "Do NOT read from a local log file" in root_agent.instruction
+
+
+def test_parse_allowed_cidrs():
+    from app.fast_api_app import parse_allowed_cidrs
+
+    nets = parse_allowed_cidrs("10.10.1.0/24, 192.168.1.1, invalid-cidr")
+    assert len(nets) == 2
+    assert str(nets[0]) == "10.10.1.0/24"
+    assert str(nets[1]) == "192.168.1.1/32"
+
+
+def test_cidr_allowlist_middleware(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.fast_api_app import app
+
+    client = TestClient(app)
+
+    # 1. When ALLOWED_CIDRS is empty, allow requests
+    monkeypatch.setenv("ALLOWED_CIDRS", "")
+    res_open = client.get("/list-apps")
+    assert res_open.status_code == 200
+
+    # 2. When ALLOWED_CIDRS is restricted to 10.10.1.0/24, block non-matching IP
+    monkeypatch.setenv("ALLOWED_CIDRS", "10.10.1.0/24")
+    res_blocked = client.get("/list-apps", headers={"X-Forwarded-For": "203.0.113.5"})
+    assert res_blocked.status_code == 403
+    assert "not in ALLOWED_CIDRS" in res_blocked.json()["detail"]
+
+    # 3. Allow matching IP in 10.10.1.0/24
+    res_allowed = client.get(
+        "/list-apps", headers={"X-Forwarded-For": "10.10.1.42, 10.0.0.1"}
+    )
+    assert res_allowed.status_code == 200

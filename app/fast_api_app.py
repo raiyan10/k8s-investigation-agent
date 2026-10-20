@@ -13,17 +13,22 @@
 # limitations under the License.
 
 import contextlib
+import ipaddress
+import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from a2a.server.tasks import InMemoryTaskStore
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from google.adk.cli.fast_api import get_fast_api_app
 from google.adk.runners import Runner
 
 from app.app_utils import services
 from app.app_utils.a2a import attach_a2a_routes
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 allow_origins = (
@@ -32,6 +37,26 @@ allow_origins = (
 otel_to_cloud = True
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def parse_allowed_cidrs(
+    raw_cidrs: str | None = None,
+) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse comma-separated CIDR blocks from ALLOWED_CIDRS."""
+    cidr_str = raw_cidrs if raw_cidrs is not None else os.getenv("ALLOWED_CIDRS", "")
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for entry in cidr_str.split(","):
+        cidr = entry.strip()
+        if not cidr:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid CIDR entry in ALLOWED_CIDRS: %s", cidr)
+    return networks
+
+
+allowed_cidrs = parse_allowed_cidrs()
 
 
 @contextlib.asynccontextmanager
@@ -68,6 +93,59 @@ app: FastAPI = get_fast_api_app(
 )
 app.title = "k8s-investigator"
 app.description = "API for interacting with the Agent k8s-investigator"
+
+
+@app.middleware("http")
+async def cidr_allowlist_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    """Enforce ingress CIDR allowlisting when ALLOWED_CIDRS is configured."""
+    raw_env_cidrs = os.getenv("ALLOWED_CIDRS")
+    active_networks = (
+        parse_allowed_cidrs(raw_env_cidrs)
+        if raw_env_cidrs is not None
+        else allowed_cidrs
+    )
+    if not active_networks:
+        return await call_next(request)
+
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    elif request.client and request.client.host:
+        client_ip = request.client.host
+    else:
+        client_ip = ""
+
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "Forbidden: unable to determine valid client IP address."
+            },
+        )
+
+    is_allowed = any(
+        ip_obj in net
+        or (
+            isinstance(ip_obj, ipaddress.IPv6Address)
+            and ip_obj.ipv4_mapped is not None
+            and ip_obj.ipv4_mapped in net
+        )
+        for net in active_networks
+    )
+    if not is_allowed:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": f"Forbidden: client IP {client_ip} is not in ALLOWED_CIDRS."
+            },
+        )
+
+    return await call_next(request)
 
 
 # Main execution

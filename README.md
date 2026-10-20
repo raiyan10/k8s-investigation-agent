@@ -9,12 +9,15 @@ The agent investigates Kubernetes incidents either by querying a live cluster vi
 - **Platform**: Gemini Enterprise Agent Platform (`google-adk` + `google-genai`)
 - **Model**: `gemini-3.8-flash`
 - **Agent Entrypoint**: [`app/agent.py`](file:///home/raiyan10/k8s-investigation-agent/app/agent.py) (`k8s_investigator`)
+- **FastAPI Backend & Security**: [`app/fast_api_app.py`](file:///home/raiyan10/k8s-investigation-agent/app/fast_api_app.py)
+  - Exposes ADK & A2A endpoints alongside configurable CIDR ingress allowlisting via the `ALLOWED_CIDRS` environment variable.
 - **Investigation Tools**: [`app/tools.py`](file:///home/raiyan10/k8s-investigation-agent/app/tools.py)
+  - `get_pods_info`: Discovers pods across namespaces or within a target namespace via `kubectl get pods -o json`, returning status, readiness, restart counts, waiting/terminated reasons, and exit codes.
+  - `get_nodes_info`: Discovers cluster nodes via `kubectl get nodes -o json`, returning node readiness, roles, Kubernetes version, internal IPs, allocatable resources, and pressure conditions (`MemoryPressure`, `DiskPressure`, `PIDPressure`, `NetworkUnavailable`).
   - `get_pod_logs`: Fetches container and pod logs via `kubectl` (supports specific containers, `--tail`, `--previous` for crashed containers, and timestamps).
   - `get_pod_events`: Retrieves Kubernetes lifecycle, warning, and failure events for a pod using `kubectl get events`.
   - `get_deployment_history`: Inspects deployment rollout history and revisions to identify recent container image changes and regressions.
   - `parse_and_sanitize_logs`: Normalizes logs, extracts line numbers (1-indexed), isolates anomalies and stack traces, and redacts sensitive credentials (bearer tokens, passwords, keys).
-  - `match_k8s_signatures`: Diagnoses failures against Kubernetes SRE catalog (OOMKilled, ImagePullBackOff, CrashLoopBackOff, Liveness/Readiness probes, CoreDNS NXDOMAIN, RBAC 403, missing ConfigMaps/Secrets).
   - `generate_investigation_report`: Compiles an evidence-backed incident investigation report in clean plain text (with ASCII dividers and uppercase headers, formatted for CLI/terminal workflows).
 
 ## Project Structure
@@ -24,10 +27,16 @@ k8s-investigator/
 ├── app/                       # Core agent code
 │   ├── agent.py               # Main agent logic and SRE instructions
 │   ├── tools.py               # Diagnostic, sanitization, and reporting tools
-│   ├── fast_api_app.py        # FastAPI Backend server
+│   ├── fast_api_app.py        # FastAPI Backend server + CIDR ingress middleware
 │   └── app_utils/             # App utilities and helpers
+├── deployment/                # Terraform IaC for single-project GCP deployment
+│   └── terraform/single-project/
+│       ├── network.tf         # Custom VPC, subnets, Cloud Router, Cloud NAT, firewall
+│       ├── service.tf         # Cloud Run v2 service with Direct VPC Egress
+│       ├── gke.tf             # Private GKE Autopilot cluster, Artifact Registry, K8s workloads
+│       └── ...                # IAM, APIs, storage, telemetry, outputs
 ├── tests/                     # Unit, integration, and eval suites
-│   ├── unit/test_tools.py     # Diagnostic and sanitization unit tests
+│   ├── unit/test_tools.py     # Diagnostic, sanitization, and CIDR allowlist unit tests
 │   ├── integration/           # E2E streaming and server integration tests
 │   └── eval/                  # Quality flywheel eval dataset and judge
 ├── .agents-cli-spec.md        # Approved project specification
@@ -100,8 +109,17 @@ gcloud config set project <your-project-id>
 agents-cli deploy
 ```
 
-To add CI/CD and Terraform, run `agents-cli scaffold enhance`.
-To set up your production infrastructure, run `agents-cli infra cicd`.
+### Production Infrastructure (Terraform)
+
+Single-project Terraform infrastructure is located in [`deployment/terraform/single-project/`](file:///home/raiyan10/k8s-investigation-agent/deployment/terraform/single-project/) and provisions:
+- **Custom VPC Network (`k8s-agent-prod-vpc`)**: Dedicated subnets for Cloud Run Direct VPC Egress (`k8s-agent-egress-subnet`, `10.10.1.0/24`) and Private GKE (`gke-private-subnet`, `10.20.0.0/20` with secondary ranges `pods = 10.24.0.0/14` and `services = 10.28.0.0/20`), backed by Cloud Router (`k8s-agent-nat-router`) and Cloud NAT (`k8s-agent-nat`).
+- **Cloud Run v2 (`k8s-investigator`)**: Attached to `k8s-agent-egress-subnet` via Direct VPC Egress (`PRIVATE_RANGES_ONLY`) so `kubectl` tool calls route directly to private cluster endpoints.
+- **Private GKE Autopilot (`k8s-investigator-cluster`)**: VPC-native cluster with private nodes, Workload Identity Federation (`<project-id>.svc.id.goog`) bound to `k8s-investigator-app`, Artifact Registry repository (`k8s-investigator`), HorizontalPodAutoscaler, PodDisruptionBudget, and an External Regional Network LoadBalancer (`LoadBalancer` Service on port `8080`).
+
+```bash
+terraform -chdir=deployment/terraform/single-project init
+terraform -chdir=deployment/terraform/single-project apply -var-file=vars/env.tfvars
+```
 
 ## Observability
 
