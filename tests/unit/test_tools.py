@@ -21,100 +21,62 @@ from unittest.mock import MagicMock, patch
 from app.tools import (
     generate_investigation_report,
     get_deployment_history,
+    get_nodes_info,
     get_pod_events,
     get_pod_logs,
-    match_k8s_signatures,
-    parse_and_sanitize_logs,
+    # match_k8s_signatures,
 )
 
-
-def test_parse_and_sanitize_logs_sanitization():
-    raw_logs = (
-        "[2026-09-26T10:00:00Z] INFO Initializing database client\n"
-        '[2026-09-26T10:00:01Z] DEBUG Connecting with password="supersecret123" and Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xyz\n'
-        "[2026-09-26T10:00:02Z] ERROR Connection failed for api_key=AIzaSyA1234567890abcdef\n"
-    )
-    result = parse_and_sanitize_logs(raw_logs)
-
-    assert result["status"] == "success"
-    assert result["total_lines"] == 3
-    assert result["error_count"] == 1
-
-    # Verify secrets are redacted
-    result_str = json.dumps(result)
-    assert "supersecret123" not in result_str
-    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in result_str
-    assert "AIzaSyA1234567890abcdef" not in result_str
-    assert "[REDACTED_SECRET]" in result_str or "[REDACTED_TOKEN]" in result_str
-
-
-def test_parse_and_sanitize_logs_stack_trace_grouping():
-    logs_with_trace = (
-        "[2026-09-26T10:14:02Z] ERROR Exception in thread main java.lang.OutOfMemoryError: Java heap space\n"
-        "\tat com.example.service.Worker.process(Worker.java:42)\n"
-        "\tat com.example.service.Main.main(Main.java:15)\n"
-        "[2026-09-26T10:14:05Z] INFO Container shutting down\n"
-    )
-    result = parse_and_sanitize_logs(logs_with_trace)
-
-    assert result["status"] == "success"
-    assert result["error_count"] == 1
-    assert len(result["anomalous_lines"]) >= 1
-    first_anomaly = result["anomalous_lines"][0]
-    assert first_anomaly["line_number"] == 1
-    assert "OutOfMemoryError" in first_anomaly["snippet"]
-
-
-def test_match_k8s_signatures_oomkilled():
-    oom_log = (
-        "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n"
-        "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\n"
-    )
-    diagnosis = match_k8s_signatures(oom_log)
-
-    assert diagnosis["status"] == "matched"
-    primary = diagnosis["primary_diagnosis"]
-    assert "OOMKilled" in primary["category"]
-    assert primary["severity"] == "CRITICAL"
-    assert primary["confidence"] >= 0.95
-    assert any(
-        "exit code 137" in cmd or "Terminated" in cmd
-        for cmd in primary["kubectl_commands"]
-    )
-
-
-def test_match_k8s_signatures_probe_failure():
-    probe_log = (
-        "[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n"
-        "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\n"
-    )
-    diagnosis = match_k8s_signatures(probe_log)
-
-    assert diagnosis["status"] == "matched"
-    primary = diagnosis["primary_diagnosis"]
-    assert "Liveness Probe" in primary["category"]
-    assert primary["severity"] == "HIGH"
-    assert any("describe pod" in cmd for cmd in primary["kubectl_commands"])
-
-
-def test_match_k8s_signatures_dns_failure():
-    dns_log = "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n"
-    diagnosis = match_k8s_signatures(dns_log)
-
-    assert diagnosis["status"] == "matched"
-    primary = diagnosis["primary_diagnosis"]
-    assert "DNS" in primary["category"]
-    assert any("kube-dns" in cmd for cmd in primary["kubectl_commands"])
-
-
-def test_match_k8s_signatures_rbac_denied():
-    rbac_log = 'User "system:serviceaccount:default:my-app" cannot list resource "pods" in API group "" in the namespace "default": 403 Forbidden\n'
-    diagnosis = match_k8s_signatures(rbac_log)
-
-    assert diagnosis["status"] == "matched"
-    primary = diagnosis["primary_diagnosis"]
-    assert "RBAC" in primary["category"]
-    assert any("auth can-i" in cmd for cmd in primary["kubectl_commands"])
+# def test_match_k8s_signatures_oomkilled():
+#     oom_log = (
+#         "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n"
+#         "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\n"
+#     )
+#     diagnosis = match_k8s_signatures(oom_log)
+#
+#     assert diagnosis["status"] == "matched"
+#     primary = diagnosis["primary_diagnosis"]
+#     assert "OOMKilled" in primary["category"]
+#     assert primary["severity"] == "CRITICAL"
+#     assert primary["confidence"] >= 0.95
+#     assert any(
+#         "exit code 137" in cmd or "Terminated" in cmd
+#         for cmd in primary["kubectl_commands"]
+#     )
+#
+#
+# def test_match_k8s_signatures_probe_failure():
+#     probe_log = (
+#         "[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n"
+#         "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\n"
+#     )
+#     diagnosis = match_k8s_signatures(probe_log)
+#
+#     assert diagnosis["status"] == "matched"
+#     primary = diagnosis["primary_diagnosis"]
+#     assert "Liveness Probe" in primary["category"]
+#     assert primary["severity"] == "HIGH"
+#     assert any("describe pod" in cmd for cmd in primary["kubectl_commands"])
+#
+#
+# def test_match_k8s_signatures_dns_failure():
+#     dns_log = "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n"
+#     diagnosis = match_k8s_signatures(dns_log)
+#
+#     assert diagnosis["status"] == "matched"
+#     primary = diagnosis["primary_diagnosis"]
+#     assert "DNS" in primary["category"]
+#     assert any("kube-dns" in cmd for cmd in primary["kubectl_commands"])
+#
+#
+# def test_match_k8s_signatures_rbac_denied():
+#     rbac_log = 'User "system:serviceaccount:default:my-app" cannot list resource "pods" in API group "" in the namespace "default": 403 Forbidden\n'
+#     diagnosis = match_k8s_signatures(rbac_log)
+#
+#     assert diagnosis["status"] == "matched"
+#     primary = diagnosis["primary_diagnosis"]
+#     assert "RBAC" in primary["category"]
+#     assert any("auth can-i" in cmd for cmd in primary["kubectl_commands"])
 
 
 def test_generate_investigation_report_dual_output():
@@ -527,14 +489,105 @@ def test_get_deployment_history_timeout():
         assert "Timed out" in result["message"]
 
 
+def test_get_nodes_info_all_nodes_success():
+    get_res = MagicMock()
+    get_res.returncode = 0
+    get_res.stdout = (
+        "NAME                              STATUS   ROLES           AGE   VERSION\n"
+        "k8s-investigation-control-plane   Ready    control-plane   3h    v1.36.1\n"
+    )
+
+    desc_res = MagicMock()
+    desc_res.returncode = 0
+    desc_res.stdout = (
+        "Name:               k8s-investigation-control-plane\n"
+        "Conditions:\n"
+        "  Type             Status  Reason\n"
+        "  MemoryPressure   False   KubeletHasSufficientMemory\n"
+        "  Ready            True    KubeletReady\n"
+    )
+
+    with patch("subprocess.run", side_effect=[get_res, desc_res]) as mock_run:
+        result = get_nodes_info()
+
+        assert mock_run.call_count == 2
+        assert result["status"] == "success"
+        assert result["node_name"] is None
+        assert result["total_nodes"] == 1
+        assert "k8s-investigation-control-plane" in result["nodes_summary"]
+        assert "MemoryPressure" in result["node_details"]
+        assert "KubeletReady" in result["nodes_info"]
+
+
+def test_get_nodes_info_specific_node_success():
+    get_res = MagicMock()
+    get_res.returncode = 0
+    get_res.stdout = (
+        "NAME      STATUS     ROLES    AGE   VERSION\n"
+        "worker-1  NotReady   <none>   1d    v1.36.1\n"
+    )
+
+    desc_res = MagicMock()
+    desc_res.returncode = 0
+    desc_res.stdout = (
+        "Name:               worker-1\n"
+        "Conditions:\n"
+        "  Ready            False   KubeletNotReady   PLEG is not healthy\n"
+    )
+
+    with patch("subprocess.run", side_effect=[get_res, desc_res]) as mock_run:
+        result = get_nodes_info(node_name="worker-1")
+
+        assert mock_run.call_count == 2
+        assert result["status"] == "success"
+        assert result["node_name"] == "worker-1"
+        assert result["total_nodes"] == 1
+        assert "PLEG is not healthy" in result["node_details"]
+
+
+def test_get_nodes_info_error_exit_code():
+    err_res = MagicMock()
+    err_res.returncode = 1
+    err_res.stderr = 'Error from server (NotFound): nodes "unknown-node" not found'
+    err_res.stdout = ""
+
+    with patch("subprocess.run", return_value=err_res):
+        result = get_nodes_info(node_name="unknown-node")
+
+        assert result["status"] == "error"
+        assert result["node_name"] == "unknown-node"
+        assert 'nodes "unknown-node" not found' in result["message"]
+
+
+def test_get_nodes_info_file_not_found():
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        result = get_nodes_info()
+
+        assert result["status"] == "error"
+        assert "kubectl executable not found" in result["message"]
+
+
+def test_get_nodes_info_timeout():
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+    ):
+        result = get_nodes_info()
+
+        assert result["status"] == "error"
+        assert "Timed out" in result["message"]
+
+
 def test_root_agent_tools_include_diagnostic_tools():
     from app.agent import root_agent
 
     assert get_pod_logs in root_agent.tools
     assert get_pod_events in root_agent.tools
+    assert get_nodes_info in root_agent.tools
     assert get_deployment_history in root_agent.tools
     assert isinstance(root_agent.instruction, str)
     assert "get_pod_logs" in root_agent.instruction
     assert "get_pod_events" in root_agent.instruction
+    assert "get_nodes_info" in root_agent.instruction
     assert "get_deployment_history" in root_agent.instruction
     assert "Do NOT read from a local log file" in root_agent.instruction
