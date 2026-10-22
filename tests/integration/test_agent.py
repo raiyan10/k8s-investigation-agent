@@ -12,12 +12,69 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+
 from google.adk.agents.run_config import RunConfig, StreamingMode
+from google.adk.memory import InMemoryMemoryService
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 from google.genai import types
 
-from app.agent import root_agent
+from app.agent import generate_memories_callback, root_agent
+
+
+def test_agent_has_memory_wired() -> None:
+    """Verify root_agent is wired with PreloadMemoryTool and after_agent_callback."""
+    assert root_agent.after_agent_callback == generate_memories_callback
+    assert any(isinstance(t, PreloadMemoryTool) for t in root_agent.tools)
+
+
+def test_cross_session_memory_persistence() -> None:
+    """Verify completed investigation sessions are saved to memory and searchable across sessions."""
+    session_service = InMemorySessionService()
+    memory_service = InMemoryMemoryService()
+
+    session_1 = session_service.create_session_sync(
+        user_id="sre_user", app_name="k8s_test"
+    )
+    runner = Runner(
+        agent=root_agent,
+        session_service=session_service,
+        memory_service=memory_service,
+        app_name="k8s_test",
+    )
+
+    incident_message = types.Content(
+        role="user",
+        parts=[
+            types.Part.from_text(
+                text=(
+                    "Please note for our incident log without calling tools: "
+                    "pod payment-api-7d9c8 in namespace payments crashed with "
+                    "OOMKilled exit code 137 due to a 512Mi memory limit."
+                )
+            )
+        ],
+    )
+
+    events_1 = list(
+        runner.run(
+            new_message=incident_message,
+            user_id="sre_user",
+            session_id=session_1.id,
+        )
+    )
+    assert len(events_1) > 0
+
+    search_result = asyncio.run(
+        memory_service.search_memory(
+            app_name="k8s_test",
+            user_id="sre_user",
+            query="payment-api OOMKilled",
+        )
+    )
+    assert len(search_result.memories) > 0
 
 
 def test_agent_stream() -> None:

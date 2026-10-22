@@ -47,3 +47,16 @@ variable "app_sa_roles" {
     "roles/serviceusage.serviceUsageConsumer",
   ]
 }
+
+variable "agent_framework" {
+  description = "Framework label on the Agent Runtime deployment. The Google Cloud console reads it to pick a playground; override it when the container is not an ADK app."
+  type        = string
+  default     = "google-adk"
+}
+
+variable "mcp_auth_token" {
+  description = "Shared Bearer token used by the Agent Runtime agent to authenticate against the GKE MCP server (/mcp)."
+  type        = string
+  sensitive   = true
+  default     = "k8s-investigator-mcp-bearer-token-2026"
+}

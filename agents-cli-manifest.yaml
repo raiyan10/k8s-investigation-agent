@@ -8,7 +8,7 @@ language: python
 framework: google-adk
 create_params:
   root_agent_name: k8s_investigator
-  deployment_target: cloud_run
+  deployment_target: agent_runtime
   cicd_runner: skip
   is_a2a: true
   agent_gateway: false

@@ -14,14 +14,19 @@
 
 resource "google_container_cluster" "private_gke" {
   name     = "k8s-investigator-cluster"
-  location = var.region
+  location = "${var.region}-b"
   project  = var.project_id
 
   network    = google_compute_network.prod_vpc.id
   subnetwork = google_compute_subnetwork.gke_private_subnet.id
 
-  # Enable Autopilot mode (enables Workload Identity golden-keel-509807-r8.svc.id.goog by default)
-  enable_autopilot = true
+  # Standard GKE cluster with user-managed node pool
+  remove_default_node_pool = true
+  initial_node_count       = 1
+
+  workload_identity_config {
+    workload_pool = "${var.project_id}.svc.id.goog"
+  }
 
   # Use private nodes on gke-private-subnet with private + public control plane endpoint
   private_cluster_config {
@@ -40,6 +45,29 @@ resource "google_container_cluster" "private_gke" {
     google_project_service.services,
     google_compute_subnetwork.gke_private_subnet,
   ]
+}
+
+# User-managed GKE node pool: 1 node, 2 vCPUs, 8 GB memory (e2-standard-2)
+resource "google_container_node_pool" "primary_nodes" {
+  name       = "${var.project_name}-node-pool"
+  location   = google_container_cluster.private_gke.location
+  cluster    = google_container_cluster.private_gke.name
+  project    = var.project_id
+  node_count = 1
+
+  node_config {
+    machine_type = "e2-standard-2"
+    disk_size_gb = 50
+    disk_type    = "pd-balanced"
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform",
+    ]
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+  }
 }
 
 # Artifact Registry for container images
@@ -80,12 +108,80 @@ resource "kubernetes_service_account_v1" "app" {
   }
 }
 
-resource "kubernetes_service_v1" "app" {
+# Grant the in-cluster MCP server ServiceAccount read-only access to inspect
+# pods, logs, events, nodes, and deployments across all namespaces.
+resource "kubernetes_cluster_role_v1" "mcp_reader" {
   metadata {
-    name      = var.project_name
+    name = "${var.project_name}-mcp-reader"
+  }
+
+  rule {
+    api_groups = [""]
+    resources = [
+      "pods",
+      "pods/log",
+      "events",
+      "nodes",
+      "namespaces",
+      "services",
+      "configmaps",
+      "replicationcontrollers",
+    ]
+    verbs = ["get", "list", "watch"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources = [
+      "deployments",
+      "replicasets",
+      "statefulsets",
+      "daemonsets",
+    ]
+    verbs = ["get", "list", "watch"]
+  }
+
+  rule {
+    api_groups = ["batch"]
+    resources  = ["jobs", "cronjobs"]
+    verbs      = ["get", "list", "watch"]
+  }
+
+  rule {
+    api_groups = ["events.k8s.io"]
+    resources  = ["events"]
+    verbs      = ["get", "list", "watch"]
+  }
+
+  depends_on = [google_container_cluster.private_gke]
+}
+
+resource "kubernetes_cluster_role_binding_v1" "mcp_reader" {
+  metadata {
+    name = "${var.project_name}-mcp-reader"
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role_v1.mcp_reader.metadata[0].name
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account_v1.app.metadata[0].name
+    namespace = kubernetes_namespace_v1.app.metadata[0].name
+  }
+}
+
+# --- Dedicated FastMCP Server Workload & LoadBalancer in GKE ---
+
+resource "kubernetes_service_v1" "mcp_server" {
+  metadata {
+    name      = "k8s-mcp-server"
     namespace = kubernetes_namespace_v1.app.metadata[0].name
     labels = {
-      app = var.project_name
+      app = "k8s-mcp-server"
     }
     annotations = {
       "cloud.google.com/l4-rbs" = "enabled"
@@ -99,89 +195,44 @@ resource "kubernetes_service_v1" "app" {
       protocol    = "TCP"
     }
     selector = {
-      app = var.project_name
+      app = "k8s-mcp-server"
     }
   }
 }
 
-resource "kubernetes_horizontal_pod_autoscaler_v2" "app" {
+resource "kubernetes_deployment_v1" "mcp_server" {
   metadata {
-    name      = var.project_name
+    name      = "k8s-mcp-server"
     namespace = kubernetes_namespace_v1.app.metadata[0].name
     labels = {
-      app = var.project_name
+      app = "k8s-mcp-server"
     }
   }
-  spec {
-    scale_target_ref {
-      api_version = "apps/v1"
-      kind        = "Deployment"
-      name        = var.project_name
-    }
-    min_replicas = 2
-    max_replicas = 10
-    metric {
-      type = "Resource"
-      resource {
-        name = "cpu"
-        target {
-          type                = "Utilization"
-          average_utilization = 70
-        }
-      }
-    }
-  }
-}
 
-resource "kubernetes_pod_disruption_budget_v1" "app" {
-  metadata {
-    name      = var.project_name
-    namespace = kubernetes_namespace_v1.app.metadata[0].name
-    labels = {
-      app = var.project_name
-    }
-  }
   spec {
-    min_available = 1
+    replicas = 1
+
     selector {
       match_labels = {
-        app = var.project_name
-      }
-    }
-  }
-}
-
-resource "kubernetes_deployment_v1" "app" {
-  metadata {
-    name      = var.project_name
-    namespace = kubernetes_namespace_v1.app.metadata[0].name
-    labels = {
-      app = var.project_name
-    }
-  }
-
-  spec {
-    selector {
-      match_labels = {
-        app = var.project_name
+        app = "k8s-mcp-server"
       }
     }
 
     template {
       metadata {
         labels = {
-          app = var.project_name
+          app = "k8s-mcp-server"
         }
       }
 
       spec {
-        termination_grace_period_seconds = 600
-
         service_account_name = kubernetes_service_account_v1.app.metadata[0].name
 
         container {
-          name  = var.project_name
-          image = "us-east1-docker.pkg.dev/${var.project_id}/${var.project_name}/${var.project_name}:latest"
+          name              = "k8s-mcp-server"
+          image             = "us-east1-docker.pkg.dev/${var.project_id}/${var.project_name}/${var.project_name}:latest"
+          image_pull_policy = "Always"
+          command           = ["uv", "run", "uvicorn", "app.mcp_server:app", "--host", "0.0.0.0", "--port", "8080", "--timeout-keep-alive", "65"]
 
           port {
             container_port = 8080
@@ -189,43 +240,8 @@ resource "kubernetes_deployment_v1" "app" {
           }
 
           env {
-            name  = "LOGS_BUCKET_NAME"
-            value = google_storage_bucket.logs_data_bucket.name
-          }
-
-          env {
-            name  = "OTEL_SERVICE_NAME"
-            value = "k8s-investigator"
-          }
-
-          env {
-            name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
-            value = "NO_CONTENT"
-          }
-
-          env {
-            name  = "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS"
-            value = "false"
-          }
-
-          env {
-            name  = "OTEL_SEMCONV_STABILITY_OPT_IN"
-            value = "gen_ai_latest_experimental"
-          }
-
-          env {
-            name  = "OTEL_INSTRUMENTATION_GENAI_UPLOAD_FORMAT"
-            value = "jsonl"
-          }
-
-          env {
-            name  = "OTEL_INSTRUMENTATION_GENAI_COMPLETION_HOOK"
-            value = "upload"
-          }
-
-          env {
-            name  = "OTEL_INSTRUMENTATION_GENAI_UPLOAD_BASE_PATH"
-            value = "gs://${google_storage_bucket.logs_data_bucket.name}/completions"
+            name  = "MCP_AUTH_TOKEN"
+            value = var.mcp_auth_token
           }
 
           env {
@@ -233,63 +249,52 @@ resource "kubernetes_deployment_v1" "app" {
             value = var.project_id
           }
 
-          env {
-            name  = "GOOGLE_CLOUD_LOCATION"
-            value = "global"
-          }
-
-          env {
-            name  = "GOOGLE_GENAI_USE_VERTEXAI"
-            value = "True"
-          }
-
           resources {
             requests = {
-              cpu    = "0.5"
-              memory = "1Gi"
+              cpu    = "200m"
+              memory = "256Mi"
             }
             limits = {
-              cpu    = "1"
-              memory = "2Gi"
+              cpu    = "500m"
+              memory = "512Mi"
             }
           }
 
           startup_probe {
-            tcp_socket {
+            http_get {
+              path = "/healthz"
               port = 8080
             }
-            initial_delay_seconds = 10
-            period_seconds        = 10
-            failure_threshold     = 18
+            initial_delay_seconds = 3
+            period_seconds        = 5
+            failure_threshold     = 20
           }
 
           readiness_probe {
-            tcp_socket {
+            http_get {
+              path = "/healthz"
               port = 8080
             }
-            initial_delay_seconds = 15
+            initial_delay_seconds = 5
             period_seconds        = 10
           }
 
           liveness_probe {
-            tcp_socket {
+            http_get {
+              path = "/healthz"
               port = 8080
             }
             initial_delay_seconds = 15
             period_seconds        = 20
-          }
-
-          lifecycle {
-            pre_stop {
-              exec {
-                command = ["sleep", "10"]
-              }
-            }
           }
         }
       }
     }
   }
 
-  depends_on = [kubernetes_namespace_v1.app]
+  depends_on = [
+    kubernetes_namespace_v1.app,
+    kubernetes_cluster_role_binding_v1.mcp_reader,
+    google_container_node_pool.primary_nodes,
+  ]
 }

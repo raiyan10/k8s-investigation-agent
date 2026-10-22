@@ -142,7 +142,7 @@ resource "google_bigquery_table" "completions_external_table" {
 resource "google_bigquery_table" "genai_logs_table" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.telemetry_dataset.dataset_id
-  table_id            = "gen_ai_client_inference_operation_details"
+  table_id            = "aiplatform_googleapis_com_reasoning_engine_stdout"
   deletion_protection = false
   description         = "GenAI inference logs exported directly from Cloud Logging"
 

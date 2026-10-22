@@ -579,18 +579,82 @@ def test_get_nodes_info_timeout():
 
 
 def test_root_agent_tools_include_diagnostic_tools():
-    from app.agent import root_agent
+    from google.adk.tools.mcp_tool import McpToolset
 
-    assert get_pod_logs in root_agent.tools
-    assert get_pod_events in root_agent.tools
-    assert get_nodes_info in root_agent.tools
-    assert get_deployment_history in root_agent.tools
+    from app.agent import MCP_SERVER_URL, k8s_mcp_toolset, root_agent
+    from app.mcp_server import mcp
+
+    assert isinstance(k8s_mcp_toolset, McpToolset)
+    assert k8s_mcp_toolset in root_agent.tools
+    assert generate_investigation_report in root_agent.tools
+    assert MCP_SERVER_URL.endswith("/mcp")
+
+    mcp_tool_names = {t.name for t in mcp._tool_manager.list_tools()}
+    assert {
+        "get_pod_logs",
+        "get_pod_events",
+        "get_nodes_info",
+        "get_deployment_history",
+        "generate_investigation_report",
+    }.issubset(mcp_tool_names)
+
     assert isinstance(root_agent.instruction, str)
     assert "get_pod_logs" in root_agent.instruction
     assert "get_pod_events" in root_agent.instruction
     assert "get_nodes_info" in root_agent.instruction
     assert "get_deployment_history" in root_agent.instruction
     assert "Do NOT read from a local log file" in root_agent.instruction
+
+
+def test_mcp_server_streamable_http_endpoint():
+    from fastapi.testclient import TestClient
+
+    from app.fast_api_app import app
+    from app.mcp_server import DEFAULT_MCP_AUTH_TOKEN
+
+    client = TestClient(app)
+
+    # 1. Unauthenticated request without Bearer token is rejected with 401
+    res_unauth = client.post(
+        "/mcp",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        },
+    )
+    assert res_unauth.status_code == 401
+
+    # 2. Authenticated request with valid Bearer token succeeds with 200
+    res = client.post(
+        "/mcp",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {DEFAULT_MCP_AUTH_TOKEN}",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    tool_names = {t["name"] for t in payload["result"]["tools"]}
+    assert {
+        "get_pod_logs",
+        "get_pod_events",
+        "get_nodes_info",
+        "get_deployment_history",
+        "generate_investigation_report",
+    }.issubset(tool_names)
 
 
 def test_parse_allowed_cidrs():
@@ -625,3 +689,318 @@ def test_cidr_allowlist_middleware(monkeypatch):
         "/list-apps", headers={"X-Forwarded-For": "10.10.1.42, 10.0.0.1"}
     )
     assert res_allowed.status_code == 200
+
+
+def test_memory_bank_config_topics():
+    from app.app_utils.memory_config import memory_bank_config
+
+    assert memory_bank_config is not None
+    assert memory_bank_config.customization_configs is not None
+    assert len(memory_bank_config.customization_configs) == 1
+
+    topics = memory_bank_config.customization_configs[0].memory_topics
+    assert topics is not None
+    managed_enums = {
+        str(t.managed_memory_topic.managed_topic_enum.name)
+        for t in topics
+        if t.managed_memory_topic is not None
+        and t.managed_memory_topic.managed_topic_enum is not None
+    }
+    custom_labels = {
+        t.custom_memory_topic.label for t in topics if t.custom_memory_topic is not None
+    }
+
+    assert {
+        "KEY_CONVERSATION_DETAILS",
+        "EXPLICIT_INSTRUCTIONS",
+        "USER_PREFERENCES",
+        "USER_PERSONAL_INFO",
+    }.issubset(managed_enums)
+    assert {
+        "kubernetes_incident_findings",
+        "remediation_and_runbook_actions",
+    }.issubset(custom_labels)
+
+
+def test_get_memory_service_local_and_vertex(monkeypatch):
+    from google.adk.memory import InMemoryMemoryService, VertexAiMemoryBankService
+
+    from app.app_utils import services
+
+    services.get_memory_service.cache_clear()
+    monkeypatch.delenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", raising=False)
+    monkeypatch.delenv("AGENT_ENGINE_ID", raising=False)
+
+    local_service = services.get_memory_service()
+    assert isinstance(local_service, InMemoryMemoryService)
+
+    services.get_memory_service.cache_clear()
+    monkeypatch.setenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", "3750754120227618816")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+
+    vertex_service = services.get_memory_service()
+    assert isinstance(vertex_service, VertexAiMemoryBankService)
+    assert vertex_service._agent_engine_id == "3750754120227618816"
+    assert vertex_service._location == "us-east1"
+
+    services.get_memory_service.cache_clear()
+
+
+def test_generate_memories_callback_saves_session():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.agent import generate_memories_callback
+
+    mock_ctx = MagicMock()
+    mock_ctx.add_session_to_memory = AsyncMock()
+
+    asyncio.run(generate_memories_callback(mock_ctx))
+    mock_ctx.add_session_to_memory.assert_awaited_once()
+
+
+def test_memory_before_model_callback_skips_tools_on_second_session():
+    import asyncio
+
+    from google.adk.models import LlmRequest
+    from google.genai import types
+
+    from app.agent import memory_and_latency_before_model_callback
+
+    mock_ctx = MagicMock()
+    req_hit = LlmRequest(
+        contents=[
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            "<PAST_CONVERSATIONS>\n"
+                            "Past Kubernetes Incident Investigation (Resource: imagepull-test-pod | Namespace: default): "
+                            "Root Cause: Failed to pull image nginx:nonexistent-tag-99999 (ImagePullBackOff).\n"
+                            "</PAST_CONVERSATIONS>"
+                        )
+                    )
+                ],
+            ),
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text="What's the problem with the pod imagepull-test-pod?"
+                    )
+                ],
+            ),
+        ],
+        config=types.GenerateContentConfig(tools=[MagicMock()]),
+    )
+    asyncio.run(memory_and_latency_before_model_callback(mock_ctx, req_hit))
+    assert req_hit.config.tools == []
+    assert req_hit.config.thinking_config.thinking_budget == 0
+
+    req_new_pod = LlmRequest(
+        contents=[
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            "<PAST_CONVERSATIONS>\n"
+                            "Past Kubernetes Incident Investigation (Resource: payment-worker-v1 | Namespace: default)\n"
+                            "</PAST_CONVERSATIONS>"
+                        )
+                    )
+                ],
+            ),
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text="What's the problem with the pod payment-worker-v2?"
+                    )
+                ],
+            ),
+        ],
+        config=types.GenerateContentConfig(tools=[MagicMock()]),
+    )
+    asyncio.run(memory_and_latency_before_model_callback(mock_ctx, req_new_pod))
+    assert len(req_new_pod.config.tools) == 1
+    assert req_new_pod.config.thinking_config.thinking_budget == 0
+
+
+def test_deduplicate_tool_calls_after_model_callback():
+    import asyncio
+
+    from google.adk.models import LlmResponse
+    from google.genai import types
+
+    from app.agent import deduplicate_tool_calls_after_model_callback
+
+    mock_ctx = MagicMock()
+    resp = LlmResponse(
+        content=types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="c1",
+                        name="get_pod_logs",
+                        args={"pod_name": "imagepull-test-pod", "namespace": "default"},
+                    )
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="c2",
+                        name="get_pod_logs",
+                        args={
+                            "pod_name": "imagepull-test-pod",
+                            "namespace": "default",
+                            "previous": True,
+                        },
+                    )
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="c3",
+                        name="get_pod_events",
+                        args={"pod_name": "imagepull-test-pod", "namespace": "default"},
+                    )
+                ),
+            ],
+        )
+    )
+    updated = asyncio.run(deduplicate_tool_calls_after_model_callback(mock_ctx, resp))
+    assert updated is not None
+    assert len(updated.content.parts) == 2
+    names = [p.function_call.name for p in updated.content.parts]
+    assert names == ["get_pod_logs", "get_pod_events"]
+
+
+def test_sibling_pod_memory_search_and_boundary_matching():
+    import asyncio
+
+    from google.adk.events.event import Event
+    from google.adk.models import LlmRequest
+    from google.genai import types
+
+    from app.agent import memory_and_latency_before_model_callback
+    from app.app_utils.services import K8sInMemoryMemoryService
+
+    svc = K8sInMemoryMemoryService()
+    for i in range(4):
+        s1 = MagicMock()
+        s1.id = f"pod1-{i}"
+        s1.app_name = "app"
+        s1.user_id = "test-user"
+        s1.events = [
+            Event(
+                author="user",
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="What's the problem with the pod imagepull-test-pod?")],
+                ),
+            ),
+            Event(
+                author="k8s_investigator",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name="get_pod_events",
+                                args={"pod_name": "imagepull-test-pod"},
+                            )
+                        )
+                    ],
+                ),
+            ),
+            Event(
+                author="k8s_investigator",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(
+                            text="2. CHRONOLOGICAL INCIDENT TIMELINE\nLine 2: imagepull-test-pod ImagePullBackOff"
+                        )
+                    ],
+                ),
+            ),
+        ]
+        asyncio.run(svc.add_session_to_memory(s1))
+
+    # Querying imagepull-test-pod-2 before it is investigated must keep tools enabled
+    req_pod2_first = LlmRequest(
+        contents=[
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text="What's the problem with the pod imagepull-test-pod-2?"
+                    )
+                ],
+            ),
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            "<PAST_CONVERSATIONS>\n"
+                            "Past Kubernetes Incident Investigation (Resource: imagepull-test-pod | Namespace: default)\n"
+                            "</PAST_CONVERSATIONS>"
+                        )
+                    )
+                ],
+            ),
+        ],
+        config=types.GenerateContentConfig(tools=[MagicMock()]),
+    )
+    asyncio.run(memory_and_latency_before_model_callback(MagicMock(), req_pod2_first))
+    assert len(req_pod2_first.config.tools) == 1
+
+    # Now add imagepull-test-pod-2 session and verify search_memory ranks it #1
+    s2 = MagicMock()
+    s2.id = "pod2-0"
+    s2.app_name = "app"
+    s2.user_id = "test-user"
+    s2.events = [
+        Event(
+            author="user",
+            content=types.Content(
+                role="user",
+                parts=[types.Part.from_text(text="What's the problem with the pod imagepull-test-pod-2?")],
+            ),
+        ),
+        Event(
+            author="k8s_investigator",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            name="get_pod_events",
+                            args={"pod_name": "imagepull-test-pod-2"},
+                        )
+                    )
+                ],
+            ),
+        ),
+        Event(
+            author="k8s_investigator",
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text="imagepull-test-pod-2 ImagePullBackOff")],
+            ),
+        ),
+    ]
+    asyncio.run(svc.add_session_to_memory(s2))
+    res = asyncio.run(
+        svc.search_memory(
+            app_name="app",
+            user_id="test-user",
+            query="What's the problem with the pod imagepull-test-pod-2?",
+        )
+    )
+    assert len(res.memories) >= 1
+    assert "Resource: imagepull-test-pod-2" in res.memories[0].content.parts[0].text
+

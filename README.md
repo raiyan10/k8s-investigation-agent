@@ -2,15 +2,23 @@
 
 A specialized Site Reliability Engineering (SRE) investigation agent built on the **Gemini Enterprise Agent Platform** using the **Google Agent Development Kit (ADK)** and `agents-cli`.
 
-The agent investigates Kubernetes incidents either by querying a live cluster via `kubectl` or by ingesting raw pod/container log text and files. It detects failure signatures (e.g. `OOMKilled` exit code 137, `ImagePullBackOff` / `ErrImagePull`, probe failures, CoreDNS/networking errors, `CrashLoopBackOff`, RBAC denials), traces chronological event timelines, redacts sensitive credentials, and produces a comprehensive incident analysis with supporting evidence and actionable `kubectl` remediation commands.
+The agent investigates Kubernetes incidents either by querying a live GKE cluster through an in-cluster **Model Context Protocol (MCP) Server** (`McpToolset` over Streamable HTTP) or local `kubectl` tools, or by ingesting raw pod/container log text and files. Furthermore, it integrates with the **Vertex AI Agent Platform Memory Bank** (`HybridMemoryBankService`) to automatically persist findings from every investigation and recall past incidents with **0 redundant tool calls** when troubleshooting recurring or related cluster issues.
 
-## Architecture
+## Key Capabilities & Architecture
 
-- **Platform**: Gemini Enterprise Agent Platform (`google-adk` + `google-genai`)
+- **Platform**: Gemini Enterprise Agent Platform (`google-adk` + `google-genai`) deployed on **Vertex AI Agent Runtime** (`agent_runtime`)
 - **Model**: `gemini-3.8-flash`
 - **Agent Entrypoint**: [`app/agent.py`](file:///home/raiyan10/k8s-investigation-agent/app/agent.py) (`k8s_investigator`)
-- **FastAPI Backend & Security**: [`app/fast_api_app.py`](file:///home/raiyan10/k8s-investigation-agent/app/fast_api_app.py)
-  - Exposes ADK & A2A endpoints alongside configurable CIDR ingress allowlisting via the `ALLOWED_CIDRS` environment variable.
+- **Agent Platform Memory Bank & Fast-Path Recall**: [`app/app_utils/services.py`](file:///home/raiyan10/k8s-investigation-agent/app/app_utils/services.py) & [`app/app_utils/memory_config.py`](file:///home/raiyan10/k8s-investigation-agent/app/app_utils/memory_config.py)
+  - **`HybridMemoryBankService`**: Combines `VertexAiMemoryBankService` (using direct `memories.create` fact persistence) with an in-process `K8sInMemoryMemoryService` write-through cache for immediate cross-session recall.
+  - **Automatic Incident Persistence (`save_investigation_to_memory`)**: Extracts structured plain-text incident summaries (`Resource`, `Namespace`, `Category`, `Severity`, `Root Cause`, `Timeline`, `Evidence Citations`, `Remediation`, and `kubectl Commands`) at the end of every investigation turn.
+  - **Hyphen-Boundary K8s Resource Scoring (`_score_memory_text`)**: Uses boundary-safe regexes (`(?<![a-z0-9-])<resource>(?![a-z0-9-])`) so sibling pods (`imagepull-test-pod` vs. `imagepull-test-pod-2`) never collide, while supporting revision family correlation (`payment-api-v1` -> `payment-api-v2`).
+  - **Zero-Tool-Call Memory Recall & Latency Guardrails (`memory_and_latency_before_model_callback`)**: Preloads matching memories via `PreloadMemoryTool` (`<PAST_CONVERSATIONS>`). When an exact resource diagnosis is already present in memory, the callback clears `llm_request.tools` and sets `thinking_budget=0` so the model answers directly from memory in a single LLM turn. For live investigations, it enforces a single discovery round + single log/event round before report synthesis.
+- **In-Cluster GKE MCP Server & Dual-Mode Client**: [`app/mcp_server.py`](file:///home/raiyan10/k8s-investigation-agent/app/mcp_server.py)
+  - Runs inside the GKE cluster (`k8s-mcp-server`) exposing all 7 diagnostic tools over Streamable HTTP (`/mcp`) with Bearer token authentication (`MCP_AUTH_TOKEN`) and a read-only Kubernetes `ClusterRole`.
+  - [`app/agent.py`](file:///home/raiyan10/k8s-investigation-agent/app/agent.py) connects to the remote GKE MCP Server via `McpToolset` (`StreamableHTTPConnectionParams`) when `MCP_SERVER_URL` is configured, and falls back to local `FunctionTool` instances for offline log analysis and local unit tests.
+- **FastAPI Backend & Security**: [`app/fast_api_app.py`](file:///home/raiyan10/k8s-investigation-agent/app/fast_api_app.py) & [`app/app_utils/reasoning_engine_adapter.py`](file:///home/raiyan10/k8s-investigation-agent/app/app_utils/reasoning_engine_adapter.py)
+  - Exposes ADK, Vertex AI Reasoning Engine (`:query` / `:streamQuery`), and A2A endpoints alongside configurable CIDR ingress allowlisting via the `ALLOWED_CIDRS` environment variable.
 - **Investigation Tools**: [`app/tools.py`](file:///home/raiyan10/k8s-investigation-agent/app/tools.py)
   - `get_pods_info`: Discovers pods across namespaces or within a target namespace via `kubectl get pods -o json`, returning status, readiness, restart counts, waiting/terminated reasons, and exit codes.
   - `get_nodes_info`: Discovers cluster nodes via `kubectl get nodes -o json`, returning node readiness, roles, Kubernetes version, internal IPs, allocatable resources, and pressure conditions (`MemoryPressure`, `DiskPressure`, `PIDPressure`, `NetworkUnavailable`).
@@ -24,24 +32,31 @@ The agent investigates Kubernetes incidents either by querying a live cluster vi
 
 ```
 k8s-investigator/
-├── app/                       # Core agent code
-│   ├── agent.py               # Main agent logic and SRE instructions
-│   ├── tools.py               # Diagnostic, sanitization, and reporting tools
-│   ├── fast_api_app.py        # FastAPI Backend server + CIDR ingress middleware
-│   └── app_utils/             # App utilities and helpers
-├── deployment/                # Terraform IaC for single-project GCP deployment
+├── app/                                 # Core agent and MCP server code
+│   ├── agent.py                         # Main agent logic, MCP client, memory & latency callbacks
+│   ├── tools.py                         # Diagnostic, sanitization, and reporting tools
+│   ├── mcp_server.py                    # Streamable HTTP FastMCP server deployed in GKE
+│   ├── fast_api_app.py                  # FastAPI backend + CIDR ingress middleware
+│   └── app_utils/
+│       ├── services.py                  # HybridMemoryBankService & K8sInMemoryMemoryService
+│       ├── memory_config.py             # Vertex AI Agent Engine Memory Bank config
+│       └── reasoning_engine_adapter.py  # Reasoning Engine / Playground payload adapter
+├── deployment/                          # Terraform IaC for single-project GCP deployment
 │   └── terraform/single-project/
-│       ├── network.tf         # Custom VPC, subnets, Cloud Router, Cloud NAT, firewall
-│       ├── service.tf         # Cloud Run v2 service with Direct VPC Egress
-│       ├── gke.tf             # Private GKE Autopilot cluster, Artifact Registry, K8s workloads
-│       └── ...                # IAM, APIs, storage, telemetry, outputs
-├── tests/                     # Unit, integration, and eval suites
-│   ├── unit/test_tools.py     # Diagnostic, sanitization, and CIDR allowlist unit tests
-│   ├── integration/           # E2E streaming and server integration tests
-│   └── eval/                  # Quality flywheel eval dataset and judge
-├── .agents-cli-spec.md        # Approved project specification
-├── GEMINI.md                  # Coding agent guidance
-└── pyproject.toml             # Project dependencies (uv)
+│       ├── network.tf                   # Custom VPC, subnets, Cloud Router, Cloud NAT, firewall
+│       ├── gke.tf                       # Private GKE Autopilot cluster, Artifact Registry, MCP Server K8s resources
+│       ├── service.tf                   # Optional Cloud Run service (count-gated via deploy_cloud_run_service)
+│       └── ...                          # IAM, APIs, storage, telemetry, outputs
+├── tests/                               # Unit, integration, and eval suites
+│   ├── unit/test_tools.py               # Diagnostic, sanitization, MCP auth, and Memory Bank unit tests
+│   ├── integration/                     # E2E streaming, Memory Bank recall, and server integration tests
+│   └── eval/                            # Quality flywheel eval datasets and custom Memory Bank judge
+│       ├── eval_config.yaml             # Evaluation metrics config
+│       ├── memory_recall_quality.py     # Custom multi-turn Memory Bank recall judge
+│       └── datasets/                    # basic-dataset.json & memory-bank-dataset.json
+├── .agents-cli-spec.md                  # Project specification
+├── GEMINI.md                            # Coding agent guidance
+└── pyproject.toml                       # Project dependencies (uv)
 ```
 
 > 💡 **Tip:** Use [Antigravity CLI](https://antigravity.google/) for AI-assisted development - project context is pre-configured in `GEMINI.md`.
@@ -49,19 +64,12 @@ k8s-investigator/
 ## Requirements
 
 Before you begin, ensure you have:
-- **uv**: Python package manager (used for all dependency management in this project) - [Install](https://docs.astral.sh/uv/getting-started/installation/) ([add packages](https://docs.astral.sh/uv/concepts/dependencies/) with `uv add <package>`)
+- **uv**: Python package manager (used for all dependency management in this project) - [Install](https://docs.astral.sh/uv/getting-started/installation/)
 - **agents-cli**: Agents CLI - Install with `uv tool install google-agents-cli`
 - **Google Cloud SDK**: For GCP services - [Install](https://cloud.google.com/sdk/docs/install)
 - **kubectl**: Kubernetes CLI (required for live cluster queries, fetching pod logs, events, and deployment rollouts) - [Install](https://kubernetes.io/docs/tasks/tools/)
 
-
 ## Quick Start
-
-Install `agents-cli` and its skills if not already installed:
-
-```bash
-uvx google-agents-cli setup
-```
 
 Install required packages:
 
@@ -69,63 +77,83 @@ Install required packages:
 agents-cli install
 ```
 
-Test the agent with a local web server:
+Test the agent locally with the interactive Playground:
 
 ```bash
 agents-cli playground
 ```
 
-You can also use features from the [ADK](https://adk.dev/) CLI with `uv run adk`.
+Run unit and integration tests:
+
+```bash
+uv run pytest tests/unit tests/integration
+```
+
+Run the evaluation suite (including multi-turn Memory Bank recall evaluation):
+
+```bash
+agents-cli eval run --dataset tests/eval/datasets/memory-bank-dataset.json --config tests/eval/eval_config.yaml
+```
 
 ## Commands
 
-| Command              | Description                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| `agents-cli install` | Install dependencies using uv                                                         |
-| `agents-cli playground` | Launch local development environment                                                  |
-| `agents-cli lint`    | Run code quality checks                                                               |
-| `agents-cli eval`    | Evaluate agent behavior (generate, grade, analyze, and more — see `agents-cli eval --help`) |
-| `uv run pytest tests/unit tests/integration` | Run unit and integration tests                                                              |
-| [A2A Inspector](https://github.com/a2aproject/a2a-inspector) | Launch A2A Protocol Inspector                                                               |
+| Command | Description |
+| --- | --- |
+| `agents-cli install` | Install dependencies using uv |
+| `agents-cli playground` | Launch local development environment |
+| `agents-cli lint` | Run code quality checks |
+| `agents-cli eval run` | Evaluate agent behavior over datasets in `tests/eval/datasets/` |
+| `uv run pytest tests/unit tests/integration` | Run unit and integration tests |
+| `agents-cli deploy` | Deploy the agent to Vertex AI Agent Runtime (`us-east1`) |
 
-## 🛠️ Project Management
+## Deployment & Infrastructure
 
-| Command | What It Does |
-|---------|--------------|
-| `agents-cli scaffold enhance` | Add CI/CD pipelines and Terraform infrastructure |
-| `agents-cli infra cicd` | One-command setup of entire CI/CD pipeline + infrastructure |
-| `agents-cli scaffold upgrade` | Auto-upgrade to latest version while preserving customizations |
-
----
-
-## Development
-
-Edit your agent logic in `app/agent.py` and test with `agents-cli playground` - it auto-reloads on save.
-
-## Deployment
-
-```bash
-gcloud config set project <your-project-id>
-agents-cli deploy
-```
-
-### Production Infrastructure (Terraform)
+### 1. Provision GKE & Network Infrastructure (Terraform)
 
 Single-project Terraform infrastructure is located in [`deployment/terraform/single-project/`](file:///home/raiyan10/k8s-investigation-agent/deployment/terraform/single-project/) and provisions:
-- **Custom VPC Network (`k8s-agent-prod-vpc`)**: Dedicated subnets for Cloud Run Direct VPC Egress (`k8s-agent-egress-subnet`, `10.10.1.0/24`) and Private GKE (`gke-private-subnet`, `10.20.0.0/20` with secondary ranges `pods = 10.24.0.0/14` and `services = 10.28.0.0/20`), backed by Cloud Router (`k8s-agent-nat-router`) and Cloud NAT (`k8s-agent-nat`).
-- **Cloud Run v2 (`k8s-investigator`)**: Attached to `k8s-agent-egress-subnet` via Direct VPC Egress (`PRIVATE_RANGES_ONLY`) so `kubectl` tool calls route directly to private cluster endpoints.
-- **Private GKE Autopilot (`k8s-investigator-cluster`)**: VPC-native cluster with private nodes, Workload Identity Federation (`<project-id>.svc.id.goog`) bound to `k8s-investigator-app`, Artifact Registry repository (`k8s-investigator`), HorizontalPodAutoscaler, PodDisruptionBudget, and an External Regional Network LoadBalancer (`LoadBalancer` Service on port `8080`).
+- **Custom VPC Network (`k8s-agent-prod-vpc`)**: Dedicated subnets for Private GKE (`gke-private-subnet`, `10.20.0.0/20` with secondary ranges `pods = 10.24.0.0/14` and `services = 10.28.0.0/20`) and egress (`10.10.1.0/24`), backed by Cloud Router (`k8s-agent-nat-router`) and Cloud NAT (`k8s-agent-nat`).
+- **Private GKE Autopilot (`k8s-investigator-cluster`)**: VPC-native cluster with Workload Identity Federation (`<project-id>.svc.id.goog`), read-only `ClusterRole` (`k8s-investigator-readonly-role`), `k8s-mcp-server` Deployment, HorizontalPodAutoscaler, PodDisruptionBudget, and an External Regional Network LoadBalancer (`k8s-mcp-server-lb` on port `8080`).
 
 ```bash
 terraform -chdir=deployment/terraform/single-project init
-terraform -chdir=deployment/terraform/single-project apply -var-file=vars/env.tfvars
+terraform -chdir=deployment/terraform/single-project apply -var-file=vars/env.tfvars -auto-approve
 ```
+
+### 2. Deploy Agent to Vertex AI Agent Runtime
+
+```bash
+gcloud config set project gke-ai-490903
+agents-cli deploy
+```
+
+### 3. Connect to the GKE Cluster from Terminal
+
+```bash
+gcloud container clusters get-credentials k8s-investigator-cluster --region us-east1 --project gke-ai-490903
+```
+
+### 4. Pause / Stop Resources (Zero-Cost Mode) & Resume Later
+
+To pause/remove all billable cloud resources (GKE Autopilot cluster, LoadBalancer IPs, Cloud NAT, and Vertex AI Reasoning Engine) when not actively testing:
+
+```bash
+# 1. Delete active Vertex AI Reasoning Engine deployment
+uv run python -c '
+import vertexai
+from google.genai import types
+client = vertexai.Client(project="gke-ai-490903", location="us-east1", http_options=types.HttpOptions(api_version="v1beta1"))
+for eng in client.agent_engines.list():
+    client.agent_engines.delete(name=eng.api_resource.name, force=True)
+'
+
+# 2. Destroy billable GKE / VPC / NAT / LoadBalancer resources via Terraform
+terraform -chdir=deployment/terraform/single-project destroy -var-file=vars/env.tfvars -auto-approve
+```
+
+To start everything back up next time:
+1. Run `terraform -chdir=deployment/terraform/single-project apply -var-file=vars/env.tfvars -auto-approve` to recreate the GKE cluster and in-cluster MCP server, then update `MCP_SERVER_URL` in `app/agent.py` if the LoadBalancer IP changed.
+2. Run `agents-cli deploy` to deploy the agent to Vertex AI Agent Runtime.
 
 ## Observability
 
 Built-in telemetry exports to Cloud Trace, BigQuery, and Cloud Logging.
-
-## A2A Inspector
-
-This agent supports the [A2A Protocol](https://a2a-protocol.org/). Use the [A2A Inspector](https://github.com/a2aproject/a2a-inspector) to test interoperability.
-See the [A2A Inspector docs](https://github.com/a2aproject/a2a-inspector) for details.

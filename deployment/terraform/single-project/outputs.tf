@@ -21,3 +21,8 @@ output "logs_bucket_name" {
   description = "Logs storage bucket name"
   value       = google_storage_bucket.logs_data_bucket.name
 }
+
+output "mcp_server_url" {
+  description = "GKE MCP server Streamable HTTP endpoint URL"
+  value       = "http://${kubernetes_service_v1.mcp_server.status[0].load_balancer[0].ingress[0].ip}:8080/mcp"
+}

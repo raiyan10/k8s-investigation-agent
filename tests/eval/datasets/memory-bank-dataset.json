@@ -1,0 +1,88 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "past_oom_incident_payment_worker",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Please investigate the pod payment-worker-v1 in the default namespace and provide a detailed root cause analysis and complete investigation report."
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The container in pod payment-worker-v1 (Incident ID INC-2026-0926-PAY) was terminated by the Linux kernel OOM killer with exit code 137 after reaching its 512MiB memory cgroup limit due to an unbounded batch fetch size (SETTLEMENT_BATCH_SIZE=50000) in BatchSettlementProcessor loading 480MB into JVM heap and triggering java.lang.OutOfMemoryError: Java heap space. Applied remediation capped SETTLEMENT_BATCH_SIZE=1000, added JVM flag -XX:MaxRAMPercentage=75.0, and raised the memory limit from 512MiB to 1024MiB."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "recurring_oom_incident_memory_recall",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "The pod payment-worker-v2 in the default namespace is experiencing a recurring OOMKilled crash. Please investigate the live logs and events for pod payment-worker-v2 in the default namespace, recall the past payment-worker-v1 OOMKilled incident from your Memory Bank (including the past incident ID, original memory limit before it was increased, and the prior SETTLEMENT_BATCH_SIZE and JVM flag remediation), and provide a complete investigation report comparing this recurrence to the past incident."
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Pod payment-worker-v2 in the default namespace was OOMKilled (exit code 137) at its 1024MiB cgroup memory limit after rollout cm-payments-v14 reverted SETTLEMENT_BATCH_SIZE=50000 and exhausted 980MB of JVM heap. Recalling past Incident ID INC-2026-0926-PAY on payment-worker-v1 from the Memory Bank, the service previously suffered the same unbounded SETTLEMENT_BATCH_SIZE=50000 heap exhaustion at its original 512MiB memory limit, which was remediated by capping SETTLEMENT_BATCH_SIZE=1000, setting -XX:MaxRAMPercentage=75.0, and raising the memory limit from 512MiB to 1024MiB. Remediation requires restoring SETTLEMENT_BATCH_SIZE=1000 in cm-payments-v14."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "past_probe_incident_checkout_api",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Please investigate the pod checkout-api-v1 in the default namespace and provide a detailed root cause analysis and complete investigation report."
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Pod checkout-api-v1 in the default namespace (Incident ID INC-2026-0926-ORD) failed Kubelet HTTP liveness probes on /healthz (status 500 after 5000ms timeout) because HikariPool-1 exhausted all 30 active connections (active=30/30, idle=0) due to an unclosed PostgreSQL transaction leak in OrderRepository.lockInventoryRow on retry. Remediation closed the transaction in OrderRepository.lockInventoryRow, increased hikari.maximum-pool-size from 30 to 50, and set livenessProbe timeoutSeconds=10."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "recurring_probe_incident_memory_recall",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "The pod checkout-api-v2 in the default namespace is failing liveness probes due to HikariPool-1 connection pool exhaustion again. Please investigate the live logs and events for pod checkout-api-v2 in the default namespace, recall the past checkout-api-v1 incident from your Memory Bank (including the past incident ID, the previous leaking method name, and the previous pool size increase), and provide a complete investigation report comparing both incidents."
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Pod checkout-api-v2 in the default namespace failed Kubelet liveness probes (HTTP 500 on /healthz after 10000ms timeout) because HikariPool-1 exhausted all 50 connections (active=50/50, idle=0) due to a new connection leak in RefundProcessor.holdEscrowRow (missing finally block close). Recalling past Incident ID INC-2026-0926-ORD on checkout-api-v1 from the Memory Bank, the service previously suffered HikariPool-1 exhaustion due to an unclosed transaction in OrderRepository.lockInventoryRow at active=30/30 (5000ms timeout), where hikari.maximum-pool-size was increased from 30 to 50 and livenessProbe timeoutSeconds was raised to 10. Remediation requires closing the connection in a finally block in RefundProcessor.holdEscrowRow and decoupling /healthz liveness probes from database pool checks."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
