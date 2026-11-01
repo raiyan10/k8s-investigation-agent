@@ -24,59 +24,62 @@ from app.tools import (
     get_nodes_info,
     get_pod_events,
     get_pod_logs,
-    # match_k8s_signatures,
+    get_pods_info,
+    match_k8s_signatures,
+    parse_and_sanitize_logs,
 )
 
-# def test_match_k8s_signatures_oomkilled():
-#     oom_log = (
-#         "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n"
-#         "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\n"
-#     )
-#     diagnosis = match_k8s_signatures(oom_log)
-#
-#     assert diagnosis["status"] == "matched"
-#     primary = diagnosis["primary_diagnosis"]
-#     assert "OOMKilled" in primary["category"]
-#     assert primary["severity"] == "CRITICAL"
-#     assert primary["confidence"] >= 0.95
-#     assert any(
-#         "exit code 137" in cmd or "Terminated" in cmd
-#         for cmd in primary["kubectl_commands"]
-#     )
-#
-#
-# def test_match_k8s_signatures_probe_failure():
-#     probe_log = (
-#         "[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n"
-#         "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\n"
-#     )
-#     diagnosis = match_k8s_signatures(probe_log)
-#
-#     assert diagnosis["status"] == "matched"
-#     primary = diagnosis["primary_diagnosis"]
-#     assert "Liveness Probe" in primary["category"]
-#     assert primary["severity"] == "HIGH"
-#     assert any("describe pod" in cmd for cmd in primary["kubectl_commands"])
-#
-#
-# def test_match_k8s_signatures_dns_failure():
-#     dns_log = "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n"
-#     diagnosis = match_k8s_signatures(dns_log)
-#
-#     assert diagnosis["status"] == "matched"
-#     primary = diagnosis["primary_diagnosis"]
-#     assert "DNS" in primary["category"]
-#     assert any("kube-dns" in cmd for cmd in primary["kubectl_commands"])
-#
-#
-# def test_match_k8s_signatures_rbac_denied():
-#     rbac_log = 'User "system:serviceaccount:default:my-app" cannot list resource "pods" in API group "" in the namespace "default": 403 Forbidden\n'
-#     diagnosis = match_k8s_signatures(rbac_log)
-#
-#     assert diagnosis["status"] == "matched"
-#     primary = diagnosis["primary_diagnosis"]
-#     assert "RBAC" in primary["category"]
-#     assert any("auth can-i" in cmd for cmd in primary["kubectl_commands"])
+
+def test_match_k8s_signatures_oomkilled():
+    oom_log = (
+        "[2026-09-26T10:14:02Z] java.lang.OutOfMemoryError: Java heap space\n"
+        "[2026-09-26T10:14:05Z] Container memory cgroup limit reached: 512MiB. Process 42 killed with exit code 137.\n"
+    )
+    diagnosis = match_k8s_signatures(oom_log)
+
+    assert diagnosis["status"] == "matched"
+    primary = diagnosis["primary_diagnosis"]
+    assert "OOMKilled" in primary["category"]
+    assert primary["severity"] == "CRITICAL"
+    assert primary["confidence"] >= 0.95
+    assert any(
+        "exit code 137" in cmd or "Terminated" in cmd
+        for cmd in primary["kubectl_commands"]
+    )
+
+
+def test_match_k8s_signatures_probe_failure():
+    probe_log = (
+        "[2026-09-26T11:00:25Z] ERROR: GET /healthz timed out after 5000ms\n"
+        "[2026-09-26T11:00:30Z] kubelet: Liveness probe failed: HTTP probe failed with statuscode: 500\n"
+    )
+    diagnosis = match_k8s_signatures(probe_log)
+
+    assert diagnosis["status"] == "matched"
+    primary = diagnosis["primary_diagnosis"]
+    assert "Liveness Probe" in primary["category"]
+    assert primary["severity"] == "HIGH"
+    assert any("describe pod" in cmd for cmd in primary["kubectl_commands"])
+
+
+def test_match_k8s_signatures_dns_failure():
+    dns_log = "[2026-09-26T12:05:01Z] ERROR: dial tcp: lookup payment-service.default.svc.cluster.local on 10.96.0.10:53: no such host\n"
+    diagnosis = match_k8s_signatures(dns_log)
+
+    assert diagnosis["status"] == "matched"
+    primary = diagnosis["primary_diagnosis"]
+    assert "DNS" in primary["category"]
+    assert any("kube-dns" in cmd for cmd in primary["kubectl_commands"])
+
+
+def test_match_k8s_signatures_rbac_denied():
+    rbac_log = 'User "system:serviceaccount:default:my-app" cannot list resource "pods" in API group "" in the namespace "default": 403 Forbidden\n'
+    diagnosis = match_k8s_signatures(rbac_log)
+
+    assert diagnosis["status"] == "matched"
+    primary = diagnosis["primary_diagnosis"]
+    assert "RBAC" in primary["category"]
+    assert any("auth can-i" in cmd for cmd in primary["kubectl_commands"])
 
 
 def test_generate_investigation_report_dual_output():
@@ -1003,4 +1006,38 @@ def test_sibling_pod_memory_search_and_boundary_matching():
     )
     assert len(res.memories) >= 1
     assert "Resource: imagepull-test-pod-2" in res.memories[0].content.parts[0].text
+
+
+def test_parse_and_sanitize_logs_redacts_secrets_and_extracts_anomalies():
+    raw_log = (
+        '{"timestamp":"2026-09-26T10:14:00Z","level":"INFO","message":"Starting service with password=super_secret_pw_123"}\n'
+        '[2026-09-26T10:14:02Z] ERROR: Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret\n'
+        '[2026-09-26T10:14:05Z] FATAL: Container killed with exit code 137 (OOMKilled)\n'
+    )
+    result = parse_and_sanitize_logs(raw_log)
+
+    assert result["status"] == "success"
+    assert result["total_lines"] == 3
+    assert result["anomalous_count"] >= 2
+    assert "super_secret_pw_123" not in result["sanitized_text"]
+    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in result["sanitized_text"]
+    assert "[REDACTED_SECRET]" in result["sanitized_text"]
+    assert "Bearer [REDACTED_TOKEN]" in result["sanitized_text"]
+
+
+def test_get_pods_info_success():
+    fake_pods_wide = (
+        "NAME                    READY   STATUS             RESTARTS        AGE   IP            NODE\n"
+        "checkout-7f9d8c-abcde   0/1     CrashLoopBackOff   4 (2m10s ago)   15m   10.244.1.15   gke-node-1\n"
+    )
+    mock_proc = MagicMock(
+        returncode=0, stdout=fake_pods_wide, stderr=""
+    )
+    with patch("subprocess.run", return_value=mock_proc):
+        res = get_pods_info(namespace="prod")
+        assert res["status"] == "success"
+        assert res["total_pods"] == 1
+        assert "checkout-7f9d8c-abcde" in res["pods_info"]
+        assert "CrashLoopBackOff" in res["pods_info"]
+
 

@@ -34,7 +34,9 @@ from app.tools import (
     get_nodes_info,
     get_pod_events,
     get_pod_logs,
-    # match_k8s_signatures,
+    get_pods_info,
+    match_k8s_signatures,
+    parse_and_sanitize_logs,
 )
 
 DEFAULT_MCP_AUTH_TOKEN = "k8s-investigator-mcp-bearer-token-2026"
@@ -59,11 +61,13 @@ mcp = FastMCP(
 )
 
 # Register Kubernetes inspection & forensic tools on the MCP server
+mcp.add_tool(get_pods_info)
 mcp.add_tool(get_pod_logs)
 mcp.add_tool(get_pod_events)
 mcp.add_tool(get_nodes_info)
 mcp.add_tool(get_deployment_history)
-# mcp.add_tool(match_k8s_signatures)
+mcp.add_tool(parse_and_sanitize_logs)
+mcp.add_tool(match_k8s_signatures)
 mcp.add_tool(generate_investigation_report)
 
 
