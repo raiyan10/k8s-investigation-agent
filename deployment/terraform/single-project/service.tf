@@ -25,13 +25,18 @@ resource "google_vertex_ai_reasoning_engine" "app" {
 
   spec {
     agent_framework = var.agent_framework
-    service_account = google_service_account.app_sa.email
-    identity_type   = "SERVICE_ACCOUNT"
+    identity_type   = "AGENT_IDENTITY"
 
     deployment_spec {
       min_instances         = 1
       max_instances         = 10
       container_concurrency = 9
+
+      agent_gateway_config {
+        agent_to_anywhere_config {
+          agent_gateway = google_network_services_agent_gateway.egress_gateway.id
+        }
+      }
 
       resource_limits = {
         cpu    = "4"
@@ -106,6 +111,11 @@ resource "google_vertex_ai_reasoning_engine" "app" {
       env {
         name  = "MCP_AUTH_TOKEN"
         value = var.mcp_auth_token
+      }
+
+      env {
+        name  = "AGENT_SPIFFE_ID"
+        value = local.agent_spiffe_uri
       }
     }
 

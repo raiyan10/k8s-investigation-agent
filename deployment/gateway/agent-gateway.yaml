@@ -1,0 +1,14 @@
+# Google Cloud Agent Gateway (Agent-to-Anywhere / Egress)
+# Usage:
+#   gcloud network-services agent-gateways import k8s-investigator-gateway \
+#     --source=deployment/gateway/agent-gateway.yaml \
+#     --location=us-east1 \
+#     --project=golden-keel-509807-r8
+name: projects/golden-keel-509807-r8/locations/us-east1/agentGateways/k8s-investigator-gateway
+description: "Agent-to-Anywhere egress gateway governing outbound MCP and tool calls from k8s-investigator"
+protocols:
+  - MCP
+googleManaged:
+  governedAccessPath: AGENT_TO_ANYWHERE
+registries:
+  - //agentregistry.googleapis.com/projects/golden-keel-509807-r8/locations/us-east1

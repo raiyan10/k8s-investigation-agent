@@ -39,6 +39,9 @@ from app.tools import (
     get_nodes_info,
     get_pod_events,
     get_pod_logs,
+    get_secret,
+    investigate_kubernetes_logs,
+    restart_deployment,
     # match_k8s_signatures,
 )
 
@@ -49,27 +52,101 @@ MODEL = "gemini-3.8-flash"
 DEFAULT_MCP_AUTH_TOKEN = "k8s-investigator-mcp-bearer-token-2026"
 MCP_SERVER_URL = os.getenv(
     "MCP_SERVER_URL",
-    "http://34.73.168.218:8080/mcp",
+    "http://136.108.57.98:8080/mcp",
 )
 MCP_AUTH_TOKEN = os.getenv(
     "MCP_AUTH_TOKEN",
     DEFAULT_MCP_AUTH_TOKEN,
 )
 
+# Google Cloud Agent Identity SPIFFE ID for this Reasoning Engine workload
+DEFAULT_AGENT_SPIFFE_ID = (
+    "spiffe://agents.global.proj-188361172024.system.id.goog/"
+    "resources/aiplatform/projects/188361172024/locations/us-east1/"
+    "reasoningEngines/2369380487647985664"
+)
+# Google Cloud Agent Gateway resource governing outbound (AGENT_TO_ANYWHERE) traffic
+DEFAULT_AGENT_GATEWAY_ID = os.getenv(
+    "AGENT_GATEWAY_EGRESS",
+    "projects/golden-keel-509807-r8/locations/us-east1/agentGateways/k8s-investigator-gateway",
+)
+_SPIFFE_WELL_KNOWN_CERT_PATH = (
+    "/var/run/secrets/workload-spiffe-credentials/certificates.pem"
+)
+
+
+def get_agent_spiffe_id() -> str:
+    """Resolve the active Google Cloud Agent SPIFFE ID from workload cert or environment."""
+    env_spiffe = os.getenv("AGENT_SPIFFE_ID", "").strip()
+    if env_spiffe:
+        return (
+            env_spiffe
+            if env_spiffe.startswith("spiffe://")
+            else f"spiffe://{env_spiffe.removeprefix('principal://')}"
+        )
+
+    cert_path = os.getenv(
+        "AGENT_IDENTITY_CERT_PATH", _SPIFFE_WELL_KNOWN_CERT_PATH
+    )
+    if os.path.isfile(cert_path):
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import ExtensionOID
+
+            with open(cert_path, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            ext = cert.extensions.get_extension_for_oid(
+                ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+            )
+            for uri in ext.value.get_values_for_type(
+                x509.UniformResourceIdentifier
+            ):
+                if uri.startswith("spiffe://"):
+                    return uri
+        except Exception as exc:
+            logger.debug("Could not parse SPIFFE X.509 workload cert: %s", exc)
+
+    engine_id = os.getenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", "").strip()
+    if engine_id:
+        engine_short_id = engine_id.split("/")[-1]
+        project_num = os.getenv("GOOGLE_CLOUD_PROJECT_NUMBER", "188361172024")
+        region = os.getenv("GOOGLE_CLOUD_REGION", "us-east1")
+        return (
+            f"spiffe://agents.global.proj-{project_num}.system.id.goog/"
+            f"resources/aiplatform/projects/{project_num}/locations/{region}/"
+            f"reasoningEngines/{engine_short_id}"
+        )
+
+    return DEFAULT_AGENT_SPIFFE_ID
+
+
+def spiffe_mcp_header_provider(_readonly_context: Any = None) -> dict[str, str]:
+    """Per-request header provider that attaches the Agent SPIFFE ID and Bearer token."""
+    return {
+        "Authorization": f"Bearer {MCP_AUTH_TOKEN}",
+        "X-Agent-Spiffe-Id": get_agent_spiffe_id(),
+        "Connection": "close",
+    }
+
+
 k8s_mcp_toolset = McpToolset(
     connection_params=StreamableHTTPConnectionParams(
         url=MCP_SERVER_URL,
         headers={
             "Authorization": f"Bearer {MCP_AUTH_TOKEN}",
+            "X-Agent-Spiffe-Id": get_agent_spiffe_id(),
             "Connection": "close",
         },
         timeout=30.0,
     ),
+    header_provider=spiffe_mcp_header_provider,
     tool_filter=[
         "get_pod_logs",
         "get_pod_events",
         "get_nodes_info",
         "get_deployment_history",
+        "restart_deployment",
+        "get_secret",
     ],
 )
 
@@ -103,7 +180,7 @@ STRICT OUTPUT FORMAT RULES:
 Guiding Principles:
 - Strict Evidence Grounding: Never fabricate or hallucinate log snippets, line numbers, or timestamps. Every citation must be strictly grounded in the retrieved logs and events.
 - Data Protection: Ensure all bearer tokens, credentials, and API keys are redacted.
-- Actionability: Ensure kubectl verification commands include appropriate namespaces and resource selectors.
+- Actionability: Ensure kubectl verification commands include appropriate namespaces and resource selectors. When explicitly asked by the user to restart a deployment or remediate by restarting (or to read a specific Kubernetes Secret), attempt `restart_deployment` (or `get_secret`) if available in the active MCP toolset; if blocked or filtered out by the Agent Gateway least-privilege policy (`k8s-investigator-least-privilege-policy`), clearly state in the report that the mutating or secret-access tool is denied by the Agent Gateway least-privilege policy and provide the recommended manual `kubectl` commands instead. Never call `restart_deployment` or `get_secret` during standard diagnostic investigations unless explicitly asked.
 - Cross-Session Incident Memory: Past Kubernetes investigation findings and remediation actions are automatically recalled from the Agent Platform Memory Bank at the start of each turn (provided in `<PAST_CONVERSATIONS>`) and saved after each investigation. When troubleshooting new or recurring incidents, explicitly cite any relevant past incident findings from memory (including exact past Incident IDs, prior resource limits or pool sizes, prior root causes, and previously applied remediation parameters) and compare them with the live diagnostic evidence from the current cluster state.
 """
 

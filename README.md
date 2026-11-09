@@ -8,10 +8,18 @@ The agent investigates Kubernetes incidents either by querying a live GKE cluste
 
 - **Platform**: Gemini Enterprise Agent Platform (`google-adk` + `google-genai`) on **Agent Runtime**
 - **Agent Entrypoint**: [`app/agent.py`](app/agent.py) (`k8s_investigator`)
+- **Zero-Trust Agent Identity (SPIFFE ID) & Kubernetes Impersonation**:
+  - Deployed with **Google Cloud Agent Identity (`--agent-identity`)**, assigning the agent a cryptographic **SPIFFE ID** (`spiffe://agents.global.proj-<PROJECT_NUMBER>.system.id.goog/resources/aiplatform/projects/<PROJECT_NUMBER>/locations/<REGION>/reasoningEngines/<ENGINE_ID>`).
+  - [`spiffe_mcp_header_provider`](app/agent.py) attaches the agent's SPIFFE identity (`X-Agent-Spiffe-Id`) to every MCP request.
+  - [`app/mcp_server.py`](app/mcp_server.py) verifies the incoming SPIFFE identity (`verify_agent_spiffe_id`) and propagates it to [`app/tools.py`](app/tools.py), which executes `kubectl` with **Kubernetes User Impersonation (`--as=<spiffe-id>`)**.
+  - Kubernetes RBAC ([`deployment/k8s/mcp-server.yaml`](deployment/k8s/mcp-server.yaml) & [`deployment/terraform/single-project/gke.tf`](deployment/terraform/single-project/gke.tf)) restricts the MCP server `ServiceAccount` strictly to `impersonate` (`k8s-mcp-impersonator-role`) and binds read-only cluster permissions (`k8s-investigation-cluster-role`) directly to the Agent's SPIFFE ID, ensuring **GKE Cloud Audit Logs** attribute every cluster action to the specific AI agent rather than a shared service account.
+- **Agent Gateway & Least-Privilege Policy Enforcement (Day 8)**:
+  - Outbound agent traffic (`AGENT_TO_ANYWHERE`) is governed by **Google Cloud Agent Gateway** (`k8s-investigator-gateway`, defined in [`deployment/gateway/agent-gateway.yaml`](deployment/gateway/agent-gateway.yaml) & [`deployment/terraform/single-project/gateway.tf`](deployment/terraform/single-project/gateway.tf)) and bound to the Vertex AI Reasoning Engine (`--agent-gateway-egress`).
+  - The **Least-Privilege Authorization & Semantic Governance Policy** ([`deployment/gateway/least-privilege-policy.yaml`](deployment/gateway/least-privilege-policy.yaml)) matches the client certificate URI SAN (`CLIENT_CERT_URI_SAN`) against the agent's SPIFFE ID (`spiffe://agents.global.proj-188361172024...`), allowing only read-only diagnostic tools (`get_pods_info`, `get_pod_logs`, `get_pod_events`, `get_deployment_history`, `get_nodes_info`, `investigate_kubernetes_logs`) while explicitly denying mutating actions (`restart_deployment`) and secret exfiltration (`get_secret`).
 - **Memory Bank Integration**: [`app/app_utils/services.py`](app/app_utils/services.py) & [`app/app_utils/memory_config.py`](app/app_utils/memory_config.py)
   - Automatically saves structured incident summaries at the end of investigations and preloads relevant past incidents (`PreloadMemoryTool`) at the start of new sessions.
 - **In-Cluster MCP Server**: [`app/mcp_server.py`](app/mcp_server.py)
-  - Exposes read-only Kubernetes diagnostic tools over Streamable HTTP (`/mcp`) with Bearer token authentication (`MCP_AUTH_TOKEN`), with automatic fallback to local `FunctionTool` execution for offline log analysis.
+  - Exposes read-only Kubernetes diagnostic tools over Streamable HTTP (`/mcp`) with Bearer token authentication (`MCP_AUTH_TOKEN`) and SPIFFE identity verification (`X-Agent-Spiffe-Id`).
 - **FastAPI Backend**: [`app/fast_api_app.py`](app/fast_api_app.py)
   - Exposes ADK, Agent Runtime, and A2A endpoints alongside configurable CIDR ingress filtering (`ALLOWED_CIDRS`).
 - **Investigation Tools**: [`app/tools.py`](app/tools.py)
@@ -20,7 +28,8 @@ The agent investigates Kubernetes incidents either by querying a live GKE cluste
   - `get_pod_logs`: Fetches container logs (supports `--tail`, `--previous`, and timestamps).
   - `get_pod_events`: Retrieves Kubernetes warning and lifecycle events for a target pod.
   - `get_deployment_history`: Inspects deployment rollout history and revision changes.
-  - `parse_and_sanitize_logs`: Normalizes logs, extracts anomalies, and redacts sensitive credentials.
+  - `restart_deployment` & `get_secret`: Mutating and secret-inspection MCP tools blocked by default under the Agent Gateway least-privilege policy (`k8s-investigator-least-privilege-policy`).
+  - `investigate_kubernetes_logs`, `parse_and_sanitize_logs`: Normalizes logs, extracts anomalies, and redacts sensitive credentials.
   - `match_k8s_signatures`: Classifies logs and events against 13 Kubernetes failure signatures (`OOMKilled`, `CrashLoopBackOff`, probe failures, `ImagePullBackOff`, DNS, PVC mounts, node pressure, RBAC, CNI, etc.).
   - `generate_investigation_report`: Produces a structured root-cause analysis report (Markdown & plain-text) with timeline citations and `kubectl` remediation steps.
 - **Reusable Agent Skill**: [`skills/k8s-pod-quick-triage/SKILL.md`](skills/k8s-pod-quick-triage/SKILL.md)

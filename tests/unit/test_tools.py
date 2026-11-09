@@ -1041,3 +1041,202 @@ def test_get_pods_info_success():
         assert "CrashLoopBackOff" in res["pods_info"]
 
 
+def test_spiffe_header_provider_and_resolution(monkeypatch):
+    from app.agent import (
+        DEFAULT_AGENT_SPIFFE_ID,
+        get_agent_spiffe_id,
+        spiffe_mcp_header_provider,
+    )
+
+    monkeypatch.delenv("AGENT_SPIFFE_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", raising=False)
+    spiffe_id = get_agent_spiffe_id()
+    assert spiffe_id == DEFAULT_AGENT_SPIFFE_ID
+    assert spiffe_id.startswith("spiffe://agents.global.")
+
+    headers = spiffe_mcp_header_provider()
+    assert headers["X-Agent-Spiffe-Id"] == DEFAULT_AGENT_SPIFFE_ID
+    assert headers["Authorization"].startswith("Bearer ")
+
+
+def test_mcp_server_verifies_spiffe_identity_header():
+    from fastapi.testclient import TestClient
+
+    from app.agent import DEFAULT_AGENT_SPIFFE_ID
+    from app.fast_api_app import app
+    from app.mcp_server import DEFAULT_MCP_AUTH_TOKEN, verify_agent_spiffe_id
+
+    assert verify_agent_spiffe_id(DEFAULT_AGENT_SPIFFE_ID) == DEFAULT_AGENT_SPIFFE_ID
+    assert verify_agent_spiffe_id("spiffe://malicious.domain/fake") is None
+
+    client = TestClient(app)
+
+    # Invalid SPIFFE ID header is rejected with 403 Forbidden
+    res_bad = client.post(
+        "/mcp",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {DEFAULT_MCP_AUTH_TOKEN}",
+            "X-Agent-Spiffe-Id": "spiffe://untrusted.domain/agent/123",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert res_bad.status_code == 403
+
+    # Valid Google Cloud Agent SPIFFE ID succeeds with 200 OK
+    res_ok = client.post(
+        "/mcp",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {DEFAULT_MCP_AUTH_TOKEN}",
+            "X-Agent-Spiffe-Id": DEFAULT_AGENT_SPIFFE_ID,
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert res_ok.status_code == 200
+
+
+def test_kubectl_user_impersonation_with_spiffe_id():
+    from app.agent import DEFAULT_AGENT_SPIFFE_ID
+    from app.tools import CURRENT_AGENT_SPIFFE_ID
+
+    mock_proc = MagicMock(returncode=0, stdout="line1\n", stderr="")
+    token = CURRENT_AGENT_SPIFFE_ID.set(DEFAULT_AGENT_SPIFFE_ID)
+    try:
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            res = get_pod_logs(pod_name="nginx-pod", namespace="default")
+            assert res["status"] == "success"
+            called_cmd = mock_run.call_args[0][0]
+            assert "--as" in called_cmd
+            assert DEFAULT_AGENT_SPIFFE_ID in called_cmd
+    finally:
+        CURRENT_AGENT_SPIFFE_ID.reset(token)
+
+
+def test_restart_deployment_success_and_error():
+    from app.tools import restart_deployment
+
+    mock_ok = MagicMock(
+        returncode=0,
+        stdout="deployment.apps/payment-api restarted\n",
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_ok) as mock_run:
+        res = restart_deployment(
+            deployment_name="payment-api-6f7d8b9c-abcde", namespace="default"
+        )
+        assert res["status"] == "success"
+        assert res["deployment_name"] == "payment-api"
+        assert res["namespace"] == "default"
+        assert "restarted" in res["message"]
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:4] == ["kubectl", "rollout", "restart", "deployment/payment-api"]
+
+    res_empty = restart_deployment(deployment_name="")
+    assert res_empty["status"] == "error"
+
+
+def test_get_secret_success_and_error():
+    import base64
+    import json
+
+    from app.tools import get_secret
+
+    secret_payload = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "type": "Opaque",
+        "data": {
+            "DB_USER": base64.b64encode(b"postgres_admin").decode("ascii"),
+            "DB_PASSWORD": base64.b64encode(b"super_secret_db_pass_2026").decode("ascii"),
+            "STRIPE_API_KEY": base64.b64encode(b"sk_live_987654321").decode("ascii"),
+        },
+    }
+    mock_ok = MagicMock(
+        returncode=0,
+        stdout=json.dumps(secret_payload),
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_ok):
+        res = get_secret(secret_name="payment-api-secret", namespace="default")
+        assert res["status"] == "success"
+        assert res["secret_name"] == "payment-api-secret"
+        assert res["data"]["DB_USER"] == "postgres_admin"
+        assert res["data"]["DB_PASSWORD"] == "super_secret_db_pass_2026"
+        assert res["data"]["STRIPE_API_KEY"] == "sk_live_987654321"
+
+    res_empty = get_secret(secret_name="   ")
+    assert res_empty["status"] == "error"
+
+
+def test_mcp_gateway_least_privilege_policy_enforcement(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.agent import DEFAULT_AGENT_SPIFFE_ID
+    from app.fast_api_app import app
+    from app.mcp_server import DEFAULT_MCP_AUTH_TOKEN, is_mcp_tool_allowed
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": f"Bearer {DEFAULT_MCP_AUTH_TOKEN}",
+        "X-Agent-Spiffe-Id": DEFAULT_AGENT_SPIFFE_ID,
+    }
+    client = TestClient(app)
+
+    # 1. With Least-Privilege Policy ENABLED (default):
+    monkeypatch.setenv("MCP_GATEWAY_POLICY_ENABLED", "true")
+    assert is_mcp_tool_allowed("get_pod_logs") is True
+    assert is_mcp_tool_allowed("restart_deployment") is False
+    assert is_mcp_tool_allowed("get_secret") is False
+
+    res_list = client.post(
+        "/mcp",
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert res_list.status_code == 200
+    tool_names = {t["name"] for t in res_list.json()["result"]["tools"]}
+    assert "get_pod_logs" in tool_names
+    assert "get_pod_events" in tool_names
+    assert "restart_deployment" not in tool_names
+    assert "get_secret" not in tool_names
+
+    # Calling restart_deployment or get_secret is blocked with 403 Forbidden
+    for blocked_tool, tool_args in [
+        ("restart_deployment", {"deployment_name": "payment-api", "namespace": "default"}),
+        ("get_secret", {"secret_name": "payment-api-secret", "namespace": "default"}),
+    ]:
+        res_call = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": blocked_tool, "arguments": tool_args},
+            },
+        )
+        assert res_call.status_code == 403
+        assert f"Invoking {blocked_tool} failed as no tool with the name is available" in res_call.json()["detail"]
+
+    # 2. With Least-Privilege Policy DISABLED (pre-gateway state):
+    monkeypatch.setenv("MCP_GATEWAY_POLICY_ENABLED", "false")
+    assert is_mcp_tool_allowed("restart_deployment") is True
+    assert is_mcp_tool_allowed("get_secret") is True
+    res_list_unrestricted = client.post(
+        "/mcp",
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}},
+    )
+    assert res_list_unrestricted.status_code == 200
+    unrestricted_names = {
+        t["name"] for t in res_list_unrestricted.json()["result"]["tools"]
+    }
+    assert "restart_deployment" in unrestricted_names
+    assert "get_secret" in unrestricted_names
+
+
+

@@ -14,12 +14,71 @@
 
 """Diagnostic and investigation tools for the Kubernetes Log Investigation Agent."""
 
+import base64
+import contextvars
 import datetime
 import json
 import os
 import re
 import subprocess
 from typing import Any
+
+# Context variable holding the verified Agent SPIFFE ID for the active MCP request.
+# When set (or when K8S_IMPERSONATE_USER is set in the environment), kubectl commands
+# use Kubernetes User Impersonation (--as=<spiffe-id>) so GKE Audit Logs record the
+# specific AI agent's SPIFFE identity rather than the shared MCP service account.
+CURRENT_AGENT_SPIFFE_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "CURRENT_AGENT_SPIFFE_ID", default=None
+)
+
+
+_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+
+def get_impersonation_args() -> list[str]:
+    """Returns kubectl user impersonation flags (['--as', '<spiffe-id>']) if an Agent SPIFFE ID is active."""
+    spiffe_id = (
+        CURRENT_AGENT_SPIFFE_ID.get()
+        or os.getenv("K8S_IMPERSONATE_USER", "").strip()
+        or None
+    )
+    if not spiffe_id:
+        return []
+
+    # In-cluster client-go disables automatic InClusterConfig discovery when --as is set
+    # without a kubeconfig file; pass the mounted ServiceAccount server/CA/token explicitly.
+    if (
+        os.path.isfile(_SA_TOKEN_PATH)
+        and os.path.isfile(_SA_CA_PATH)
+        and not os.getenv("KUBECONFIG")
+        and not os.path.isfile(os.path.expanduser("~/.kube/config"))
+    ):
+        try:
+            with open(_SA_TOKEN_PATH, encoding="utf-8") as f:
+                sa_token = f.read().strip()
+            host = os.getenv("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+            port = os.getenv("KUBERNETES_SERVICE_PORT", "443")
+            return [
+                f"--server=https://{host}:{port}",
+                f"--certificate-authority={_SA_CA_PATH}",
+                f"--token={sa_token}",
+                "--as",
+                spiffe_id,
+            ]
+        except OSError:
+            pass
+
+    return ["--as", spiffe_id]
+
+
+def _with_impersonation(cmd: list[str]) -> list[str]:
+    """Appends Kubernetes user impersonation flags to a kubectl command if an Agent SPIFFE ID is active."""
+    imp_args = get_impersonation_args()
+    if not imp_args:
+        return cmd
+    return [*cmd, *imp_args]
+
 
 
 def _mask_sensitive_data(text: str) -> str:
@@ -78,7 +137,7 @@ def get_pods_info(
 
     try:
         result = subprocess.run(
-            cmd,
+            _with_impersonation(cmd),
             capture_output=True,
             text=True,
             timeout=30,
@@ -193,7 +252,7 @@ def get_pod_logs(
 
     try:
         result = subprocess.run(
-            cmd,
+            _with_impersonation(cmd),
             capture_output=True,
             text=True,
             timeout=30,
@@ -296,7 +355,7 @@ def get_pod_events(
 
     try:
         result = subprocess.run(
-            cmd,
+            _with_impersonation(cmd),
             capture_output=True,
             text=True,
             timeout=30,
@@ -388,7 +447,7 @@ def get_nodes_info(
 
     try:
         get_res = subprocess.run(
-            get_cmd,
+            _with_impersonation(get_cmd),
             capture_output=True,
             text=True,
             timeout=30,
@@ -417,7 +476,7 @@ def get_nodes_info(
             total_nodes = len(lines)
 
         desc_res = subprocess.run(
-            desc_cmd,
+            _with_impersonation(desc_cmd),
             capture_output=True,
             text=True,
             timeout=30,
@@ -580,7 +639,7 @@ def get_deployment_history(
         ]
         try:
             res = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, check=False
+                _with_impersonation(cmd), capture_output=True, text=True, timeout=30, check=False
             )
             if res.returncode != 0:
                 err_msg = (res.stderr or res.stdout or "Unknown error").strip()
@@ -637,7 +696,7 @@ def get_deployment_history(
     ]
     try:
         res = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, check=False
+            _with_impersonation(cmd), capture_output=True, text=True, timeout=30, check=False
         )
         if res.returncode != 0:
             err_msg = (res.stderr or res.stdout or "Unknown error").strip()
@@ -668,7 +727,7 @@ def get_deployment_history(
                 f"--revision={latest_rev}",
             ]
             res_latest = subprocess.run(
-                cmd_latest,
+                _with_impersonation(cmd_latest),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -690,7 +749,7 @@ def get_deployment_history(
                 f"--revision={prev_rev}",
             ]
             res_prev = subprocess.run(
-                cmd_prev,
+                _with_impersonation(cmd_prev),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -765,6 +824,211 @@ def get_deployment_history(
             "message": f"Unexpected error while fetching deployment rollout history for '{target_deployment}': {e}",
             "error": str(e),
         }
+
+
+def restart_deployment(
+    deployment_name: str,
+    namespace: str = "default",
+) -> dict:
+    """Restarts a Kubernetes deployment using `kubectl rollout restart`.
+
+    Args:
+        deployment_name: Name of the Kubernetes deployment (or pod belonging to a deployment) to restart.
+        namespace: The Kubernetes namespace where the deployment is running. Defaults to 'default'.
+
+    Returns:
+        A dictionary containing the status ('success' or 'error'), deployment_name, namespace,
+        and rollout restart output message.
+    """
+    if not deployment_name or not deployment_name.strip():
+        return {
+            "status": "error",
+            "deployment_name": "",
+            "namespace": namespace,
+            "message": "deployment_name must not be empty.",
+            "error": "Invalid deployment_name",
+        }
+
+    raw_name = deployment_name.strip()
+    pod_match = re.match(r"^(.+)-[a-f0-9]{8,10}-[a-z0-9]{5}$", raw_name)
+    target_deployment = pod_match.group(1) if pod_match else raw_name
+    clean_namespace = namespace.strip() if namespace and namespace.strip() else "default"
+
+    cmd = [
+        "kubectl",
+        "rollout",
+        "restart",
+        f"deployment/{target_deployment}",
+        "-n",
+        clean_namespace,
+    ]
+    try:
+        res = subprocess.run(
+            _with_impersonation(cmd),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if res.returncode != 0:
+            err_msg = (res.stderr or res.stdout or "Unknown error").strip()
+            return {
+                "status": "error",
+                "deployment_name": target_deployment,
+                "namespace": clean_namespace,
+                "message": f"Failed to restart deployment '{target_deployment}' in namespace '{clean_namespace}': {err_msg}",
+                "error": err_msg,
+            }
+        output_text = (res.stdout or "").strip()
+        return {
+            "status": "success",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "output": output_text,
+            "message": output_text
+            or f"deployment.apps/{target_deployment} restarted in namespace '{clean_namespace}'.",
+        }
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "message": "kubectl executable not found. Ensure kubectl is installed and in PATH.",
+            "error": "kubectl not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "message": f"Timed out while restarting deployment '{target_deployment}' in namespace '{clean_namespace}'.",
+            "error": "TimeoutExpired",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "deployment_name": target_deployment,
+            "namespace": clean_namespace,
+            "message": f"Unexpected error while restarting deployment '{target_deployment}': {e}",
+            "error": str(e),
+        }
+
+
+def get_secret(
+    secret_name: str,
+    namespace: str = "default",
+) -> dict:
+    """Fetches and decodes a Kubernetes Secret from the specified namespace using kubectl.
+
+    Args:
+        secret_name: The name of the Kubernetes Secret to retrieve.
+        namespace: The Kubernetes namespace where the Secret resides. Defaults to 'default'.
+
+    Returns:
+        A dictionary containing the status ('success' or 'error'), secret_name, namespace,
+        secret type, keys, and decoded secret data.
+    """
+    if not secret_name or not secret_name.strip():
+        return {
+            "status": "error",
+            "secret_name": "",
+            "namespace": namespace,
+            "data": {},
+            "message": "secret_name must not be empty.",
+            "error": "Invalid secret_name",
+        }
+
+    clean_secret = secret_name.strip()
+    clean_namespace = namespace.strip() if namespace and namespace.strip() else "default"
+    cmd = [
+        "kubectl",
+        "get",
+        "secret",
+        clean_secret,
+        "-n",
+        clean_namespace,
+        "-o",
+        "json",
+    ]
+    try:
+        res = subprocess.run(
+            _with_impersonation(cmd),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if res.returncode != 0:
+            err_msg = (res.stderr or res.stdout or "Unknown error").strip()
+            return {
+                "status": "error",
+                "secret_name": clean_secret,
+                "namespace": clean_namespace,
+                "data": {},
+                "message": f"Failed to fetch secret '{clean_secret}' in namespace '{clean_namespace}': {err_msg}",
+                "error": err_msg,
+            }
+
+        secret_obj = json.loads(res.stdout or "{}")
+        raw_data = secret_obj.get("data") or {}
+        decoded_data: dict[str, str] = {}
+        for k, v in raw_data.items():
+            try:
+                decoded_data[k] = base64.b64decode(v).decode("utf-8", errors="replace")
+            except Exception:
+                decoded_data[k] = str(v)
+
+        string_data = secret_obj.get("stringData") or {}
+        for k, v in string_data.items():
+            decoded_data.setdefault(k, str(v))
+
+        return {
+            "status": "success",
+            "secret_name": clean_secret,
+            "namespace": clean_namespace,
+            "type": secret_obj.get("type", "Opaque"),
+            "keys": sorted(decoded_data.keys()),
+            "data": decoded_data,
+        }
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "secret_name": clean_secret,
+            "namespace": clean_namespace,
+            "data": {},
+            "message": "kubectl executable not found. Ensure kubectl is installed and in PATH.",
+            "error": "kubectl not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "secret_name": clean_secret,
+            "namespace": clean_namespace,
+            "data": {},
+            "message": f"Timed out while fetching secret '{clean_secret}' in namespace '{clean_namespace}'.",
+            "error": "TimeoutExpired",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "secret_name": clean_secret,
+            "namespace": clean_namespace,
+            "data": {},
+            "message": f"Unexpected error while fetching secret '{clean_secret}': {e}",
+            "error": str(e),
+        }
+
+
+def investigate_kubernetes_logs(log_content: str) -> dict:
+    """Combines log sanitization and Kubernetes signature matching into a single read-only analysis."""
+    sanitized = parse_and_sanitize_logs(log_content)
+    text_to_match = sanitized.get("sanitized_text") or log_content
+    signatures = match_k8s_signatures(text_to_match)
+    return {
+        "status": "success",
+        "sanitized": sanitized,
+        "signatures": signatures,
+    }
 
 
 def parse_and_sanitize_logs(log_content: str) -> dict:

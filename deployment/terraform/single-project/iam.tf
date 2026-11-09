@@ -67,9 +67,39 @@ resource "google_project_iam_member" "vertex_ai_sa_permissions" {
     join(",", pair) => pair[1]
   }
 
-  project = var.project_id
-  role    = each.value
-  member  = google_project_service_identity.vertex_sa.member
+  project    = var.project_id
+  role       = each.value
+  member     = google_project_service_identity.vertex_sa.member
   depends_on = [resource.google_project_service.services]
+}
+
+locals {
+  agent_identity_roles = [
+    "roles/aiplatform.user",
+    "roles/serviceusage.serviceUsageConsumer",
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+    "roles/cloudtrace.agent",
+    "roles/storage.admin",
+    "roles/browser",
+    "roles/cloudapiregistry.viewer",
+  ]
+  agent_engine_short_id = element(
+    split("/", google_vertex_ai_reasoning_engine.app.id),
+    length(split("/", google_vertex_ai_reasoning_engine.app.id)) - 1
+  )
+  agent_spiffe_path = "agents.global.proj-${data.google_project.project.number}.system.id.goog/resources/aiplatform/projects/${data.google_project.project.number}/locations/${var.region}/reasoningEngines/${local.agent_engine_short_id}"
+  agent_spiffe_uri  = "spiffe://${local.agent_spiffe_path}"
+  agent_principal   = "principal://${local.agent_spiffe_path}"
+}
+
+# Grant Google Cloud IAM roles directly to the Agent's SPIFFE identity principal
+resource "google_project_iam_member" "agent_identity_roles" {
+  for_each = toset(local.agent_identity_roles)
+
+  project    = var.project_id
+  role       = each.value
+  member     = local.agent_principal
+  depends_on = [google_vertex_ai_reasoning_engine.app]
 }
 

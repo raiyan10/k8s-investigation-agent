@@ -108,11 +108,46 @@ resource "kubernetes_service_account_v1" "app" {
   }
 }
 
-# Grant the in-cluster MCP server ServiceAccount read-only access to inspect
-# pods, logs, events, nodes, and deployments across all namespaces.
+# Allow the in-cluster MCP server ServiceAccount ONLY to impersonate Kubernetes
+# users/identities (specifically the Agent's SPIFFE identity), rather than
+# holding direct cluster-wide read permissions itself.
+resource "kubernetes_cluster_role_v1" "mcp_impersonator" {
+  metadata {
+    name = "k8s-mcp-impersonator-role"
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["users", "groups", "serviceaccounts"]
+    verbs      = ["impersonate"]
+  }
+
+  depends_on = [google_container_cluster.private_gke]
+}
+
+resource "kubernetes_cluster_role_binding_v1" "mcp_impersonator" {
+  metadata {
+    name = "k8s-mcp-impersonator-binding"
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role_v1.mcp_impersonator.metadata[0].name
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account_v1.app.metadata[0].name
+    namespace = kubernetes_namespace_v1.app.metadata[0].name
+  }
+}
+
+# Read-only Kubernetes ClusterRole for investigating pods, logs, events, nodes,
+# and deployments across all namespaces.
 resource "kubernetes_cluster_role_v1" "mcp_reader" {
   metadata {
-    name = "${var.project_name}-mcp-reader"
+    name = "k8s-investigation-cluster-role"
   }
 
   rule {
@@ -156,9 +191,12 @@ resource "kubernetes_cluster_role_v1" "mcp_reader" {
   depends_on = [google_container_cluster.private_gke]
 }
 
+# Bind read-only Kubernetes access directly to the Agent's SPIFFE identity
+# (instead of the shared MCP server ServiceAccount) so GKE Audit Logs attribute
+# every get/list/watch action to the specific AI agent's SPIFFE ID.
 resource "kubernetes_cluster_role_binding_v1" "mcp_reader" {
   metadata {
-    name = "${var.project_name}-mcp-reader"
+    name = "k8s-investigator-cluster-role-binding"
   }
 
   role_ref {
@@ -168,9 +206,15 @@ resource "kubernetes_cluster_role_binding_v1" "mcp_reader" {
   }
 
   subject {
-    kind      = "ServiceAccount"
-    name      = kubernetes_service_account_v1.app.metadata[0].name
-    namespace = kubernetes_namespace_v1.app.metadata[0].name
+    kind      = "User"
+    name      = local.agent_spiffe_uri
+    api_group = "rbac.authorization.k8s.io"
+  }
+
+  subject {
+    kind      = "User"
+    name      = local.agent_spiffe_path
+    api_group = "rbac.authorization.k8s.io"
   }
 }
 
@@ -242,6 +286,11 @@ resource "kubernetes_deployment_v1" "mcp_server" {
           env {
             name  = "MCP_AUTH_TOKEN"
             value = var.mcp_auth_token
+          }
+
+          env {
+            name  = "AGENT_SPIFFE_ID"
+            value = local.agent_spiffe_uri
           }
 
           env {

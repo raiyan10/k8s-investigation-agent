@@ -1,0 +1,70 @@
+# Least-Privilege Authorization & Semantic Governance Policy for k8s-investigator
+# Ties the Agent's SPIFFE identity (CLIENT_CERT_URI_SAN) to read-only Kubernetes MCP tools
+# and explicitly blocks mutating (restart_deployment) and secret-exfiltration (get_secret) tools.
+#
+# Usage:
+#   gcloud network-security authz-policies import k8s-investigator-least-privilege-policy \
+#     --source=deployment/gateway/least-privilege-policy.yaml \
+#     --location=us-east1 \
+#     --project=golden-keel-509807-r8
+name: projects/golden-keel-509807-r8/locations/us-east1/authzPolicies/k8s-investigator-least-privilege-policy
+description: "Least-privilege MCP tool governance policy for k8s-investigator SPIFFE identity: allow read-only diagnostics, deny restart_deployment and get_secret."
+action: ALLOW
+policyProfile: REQUEST_AUTHZ
+target:
+  resources:
+    - projects/golden-keel-509807-r8/locations/us-east1/agentGateways/k8s-investigator-gateway
+httpRules:
+  - from:
+      sources:
+        - principals:
+            - principalSelector: CLIENT_CERT_URI_SAN
+              principal:
+                exact: "spiffe://agents.global.proj-188361172024.system.id.goog/resources/aiplatform/projects/188361172024/locations/us-east1/reasoningEngines/2369380487647985664"
+    to:
+      operations:
+        - mcp:
+            baseProtocolMethodsOption: MATCH_BASE_PROTOCOL_METHODS
+            methods:
+              - name: "tools/list"
+              - name: "tools/call"
+                params:
+                  - exact: "get_pods_info"
+                  - exact: "get_pod_logs"
+                  - exact: "get_pod_events"
+                  - exact: "get_deployment_history"
+                  - exact: "get_nodes_info"
+                  - exact: "investigate_kubernetes_logs"
+                  - exact: "parse_and_sanitize_logs"
+                  - exact: "match_k8s_signatures"
+                  - exact: "generate_investigation_report"
+---
+# Explicit Deny Rule / Semantic Governance Policy Specification
+apiVersion: agentplatform.cloud.google.com/v1beta1
+kind: SemanticGovernancePolicy
+metadata:
+  name: k8s-investigator-least-privilege-policy
+  project: golden-keel-509807-r8
+  location: us-east1
+spec:
+  displayName: "Least-Privilege Policy for K8s Investigator Agent"
+  agentIdentity: "spiffe://agents.global.proj-188361172024.system.id.goog/resources/aiplatform/projects/188361172024/locations/us-east1/reasoningEngines/2369380487647985664"
+  gateway: "projects/golden-keel-509807-r8/locations/us-east1/agentGateways/k8s-investigator-gateway"
+  rules:
+    allowTools:
+      - get_pods_info
+      - get_pod_logs
+      - get_pod_events
+      - get_deployment_history
+      - get_nodes_info
+      - investigate_kubernetes_logs
+    denyTools:
+      - restart_deployment
+      - get_secret
+  naturalLanguageConstraint: >-
+    Allow the Kubernetes investigation agent (SPIFFE ID
+    spiffe://agents.global.proj-188361172024.system.id.goog/resources/aiplatform/projects/188361172024/locations/us-east1/reasoningEngines/2369380487647985664)
+    to invoke only read-only diagnostic tools (get_pods_info, get_pod_logs,
+    get_pod_events, get_deployment_history, get_nodes_info,
+    investigate_kubernetes_logs). Strictly deny any mutating cluster actions
+    (restart_deployment) and secret exfiltration tools (get_secret).

@@ -32,6 +32,10 @@ locals {
     "logging.googleapis.com",
     "cloudtrace.googleapis.com",
     "telemetry.googleapis.com",
+    "networkservices.googleapis.com",
+    "networksecurity.googleapis.com",
+    "iap.googleapis.com",
+    "agentregistry.googleapis.com",
   ]
 }
 

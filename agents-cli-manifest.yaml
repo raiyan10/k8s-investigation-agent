@@ -11,5 +11,5 @@ create_params:
   deployment_target: agent_runtime
   cicd_runner: skip
   is_a2a: true
-  agent_gateway: false
+  agent_gateway: true
   agent_guidance_filename: GEMINI.md
